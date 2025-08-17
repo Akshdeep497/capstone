@@ -1,12 +1,18 @@
 # requirements.txt:
-
+# streamlit
+# google-generativeai
+# gtts
+# Pillow
+# streamlit-audiorec
+# SpeechRecognition
+# pydub
 
 import streamlit as st
 from PIL import Image
 import google.generativeai as genai
 from gtts import gTTS
 import speech_recognition as sr
-from st_audiorec import st_audiorec
+from streamlit_audiorec import st_audiorec
 import os
 import io
 
@@ -17,7 +23,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("Vision & Voice AI Assistant �🎙️")
+st.title("Vision & Voice AI Assistant 👓🎙️")
 st.markdown("This app functions like AI smart glasses. Upload an image, ask a question with your voice, and get a spoken answer.")
 
 # --- API Key Configuration ---
@@ -106,7 +112,8 @@ if st.button("Get Answer", disabled=(uploaded_file is None or not transcribed_te
         with st.spinner("Analyzing the image and generating a response..."):
             try:
                 # Initialize the generative model
-                model = genai.GenerativeModel('gemini-pro-vision') # Using the vision model
+                # Use 'gemini-pro-vision' for tasks involving images
+                model = genai.GenerativeModel('gemini-pro-vision')
 
                 # Define the context prompt
                 context_prompt = "You are an AI smart glasses assistant. You need to answer the user's questions according to the image provided."
@@ -120,7 +127,7 @@ if st.button("Get Answer", disabled=(uploaded_file is None or not transcribed_te
                     }
                 ]
 
-                # Generate content
+                # Generate content using the prompt and the image
                 response = model.generate_content([final_prompt, image_parts[0]])
 
                 # --- Process and Display Response ---
@@ -137,7 +144,7 @@ if st.button("Get Answer", disabled=(uploaded_file is None or not transcribed_te
                         tts.write_to_fp(audio_fp)
                         audio_fp.seek(0)
                         
-                        # Play the audio response
+                        # Play the audio response automatically
                         st.audio(audio_fp, format='audio/mp3', start_time=0)
                 else:
                     st.error("The model did not return a valid text response.")
@@ -149,4 +156,3 @@ if st.button("Get Answer", disabled=(uploaded_file is None or not transcribed_te
                 st.error(f"An unexpected error occurred: {e}")
     else:
         st.warning("Please upload an image and record your question first.")
-�
