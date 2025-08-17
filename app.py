@@ -3,7 +3,7 @@
 # google-generativeai
 # gtts
 # Pillow
-# streamlit-audiorec
+# mic-recorder-to-streamlit
 # SpeechRecognition
 # pydub
 
@@ -12,7 +12,7 @@ from PIL import Image
 import google.generativeai as genai
 from gtts import gTTS
 import speech_recognition as sr
-from streamlit_audiorec import st_audiorec
+from mic_recorder import mic_recorder # Updated import
 import os
 import io
 
@@ -90,12 +90,19 @@ with col1:
 with col2:
     st.header("2. Record Your Question")
     
-    # Audio recorder component
-    wav_audio_data = st_audiorec()
+    # Audio recorder component from the new library
+    audio_data = mic_recorder(
+        start_prompt="Start recording",
+        stop_prompt="Stop recording",
+        key='recorder'
+    )
 
     transcribed_text = ""
-    if wav_audio_data is not None:
+    if audio_data is not None and audio_data['bytes']:
+        # Get the audio bytes from the dictionary
+        wav_audio_data = audio_data['bytes']
         st.audio(wav_audio_data, format='audio/wav')
+        
         # Transcribe the recorded audio
         with st.spinner("Transcribing your voice..."):
             transcribed_text = transcribe_audio(wav_audio_data)
