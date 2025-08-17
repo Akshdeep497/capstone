@@ -1,7 +1,5 @@
 streamlit
 google-generativeai
-gtts
-Pillow
-mic-recorder-to-streamlit
-SpeechRecognition
-pydub
+gTTS
+python-dotenv
+streamlit-mic-recorder
