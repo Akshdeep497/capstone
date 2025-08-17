@@ -1,4 +1,3 @@
-import os
 import mimetypes
 from io import BytesIO
 
@@ -6,14 +5,7 @@ import streamlit as st
 from gtts import gTTS
 import google.generativeai as genai
 
-# Optional .env support
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
-# ---------- Mic imports (choose what's available) ----------
+# ---------- Mic imports (auto-detect) ----------
 _MIC_IMPL = None
 try:
     # pip install streamlit-mic-recorder
@@ -27,31 +19,8 @@ except Exception:
     except Exception:
         _MIC_IMPL = None
 
+
 # ---------- Helpers ----------
-def get_api_key() -> str:
-    """
-    Fetch API key from (in order):
-      1) Streamlit secrets
-      2) Environment variable
-      3) Session (from sidebar input)
-    """
-    key = None
-    try:
-        key = st.secrets.get("GOOGLE_API_KEY", None)
-    except Exception:
-        pass
-    if not key:
-        key = os.environ.get("GOOGLE_API_KEY", None)
-    if not key:
-        key = st.session_state.get("GOOGLE_API_KEY", "")
-    return key or ""
-
-def ensure_api_key() -> str:
-    key = get_api_key()
-    if not key:
-        st.sidebar.warning("Set your Google API key to proceed.")
-    return key
-
 def tts_bytes(text: str) -> bytes:
     """Convert text to MP3 bytes using gTTS."""
     buf = BytesIO()
@@ -84,24 +53,14 @@ def generate_with_gemini(parts, model_name: str = "gemini-2.5-flash", timeout: i
                 return text
         raise e
 
+
 # ---------- UI ----------
 st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
 st.title("🕶️ Smart Glasses Assistant (Image + Voice → Spoken Answer)")
 
 with st.sidebar:
-    st.subheader("API Key")
-    st.caption("Use `.streamlit/secrets.toml`, an env var, or paste below.")
-    api_key_input = st.text_input("GOOGLE_API_KEY", type="password", placeholder="Paste key (not stored permanently)")
-    if api_key_input:
-        st.session_state["GOOGLE_API_KEY"] = api_key_input
-
-    st.markdown("---")
-    st.write("**Tips**")
-    st.markdown(
-        "- Prefer JPEG/PNG/WebP images\n"
-        "- Voice: record via mic or upload WAV/MP3/OGG/WEBM/M4A\n"
-        "- If no mic component is installed, use audio upload or only text"
-    )
+    st.subheader("Secrets-only API Key")
+    st.caption("This app reads GOOGLE_API_KEY from `.streamlit/secrets.toml` only.")
 
 # Inputs
 img_file = st.file_uploader("📷 Upload an image", type=["jpg", "jpeg", "png", "webp"])
@@ -147,9 +106,11 @@ go = st.button("🧠 Analyze & Speak")
 
 # ---------- Main ----------
 if go:
-    key = ensure_api_key()
-    if not key:
-        st.error("Please provide a valid GOOGLE_API_KEY.")
+    # --- Secrets-only key ---
+    try:
+        api_key = st.secrets["GOOGLE_API_KEY"]
+    except Exception:
+        st.error("`GOOGLE_API_KEY` not found in secrets. See setup below.")
         st.stop()
 
     if not img_file:
@@ -160,8 +121,8 @@ if go:
         st.error("Provide a voice prompt (record/upload) or enter a text prompt.")
         st.stop()
 
-    # Configure SDK
-    genai.configure(api_key=key)
+    # Configure SDK with secrets-only key
+    genai.configure(api_key=api_key)
 
     # Build system + user prompt
     system_context = (
