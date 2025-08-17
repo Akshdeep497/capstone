@@ -3,3 +3,4 @@ google-generativeai
 gTTS
 python-dotenv
 streamlit-mic-recorder
+audio-recorder-streamlit
