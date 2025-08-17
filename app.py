@@ -5,7 +5,20 @@ import streamlit as st
 from gtts import gTTS
 import google.generativeai as genai
 
-# ---------- Mic imports (auto-detect) ----------
+# ======= Page setup (no sidebar) =======
+st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
+# Hide sidebar & toolbar completely
+st.markdown("""
+<style>
+section[data-testid="stSidebar"] { display: none !important; }
+div[data-testid="stToolbar"] { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🕶️ Smart Glasses Assistant (Image + Voice → Spoken Answer)")
+st.caption("Uses GOOGLE_API_KEY from `.streamlit/secrets.toml` only.")
+
+# ======= Optional mic components (auto-detect) =======
 _MIC_IMPL = None
 try:
     # pip install streamlit-mic-recorder
@@ -19,10 +32,8 @@ except Exception:
     except Exception:
         _MIC_IMPL = None
 
-
-# ---------- Helpers ----------
+# ======= Helpers =======
 def tts_bytes(text: str) -> bytes:
-    """Convert text to MP3 bytes using gTTS."""
     buf = BytesIO()
     gTTS(text).write_to_fp(buf)
     buf.seek(0)
@@ -34,7 +45,8 @@ def guess_mime(filename: str, default: str = "application/octet-stream") -> str:
 
 def generate_with_gemini(parts, model_name: str = "gemini-2.5-flash", timeout: int = 90) -> str:
     """
-    Try Gemini 2.5 Flash first; if audio present and it fails/empty, fall back to 1.5 Flash.
+    Try Gemini 2.5 Flash first; if there's audio and it fails/returns empty,
+    fall back to Gemini 1.5 Flash which is very robust for audio.
     """
     model = genai.GenerativeModel(model_name)
     try:
@@ -53,16 +65,7 @@ def generate_with_gemini(parts, model_name: str = "gemini-2.5-flash", timeout: i
                 return text
         raise e
 
-
-# ---------- UI ----------
-st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
-st.title("🕶️ Smart Glasses Assistant (Image + Voice → Spoken Answer)")
-
-with st.sidebar:
-    st.subheader("Secrets-only API Key")
-    st.caption("This app reads GOOGLE_API_KEY from `.streamlit/secrets.toml` only.")
-
-# Inputs
+# ======= Inputs =======
 img_file = st.file_uploader("📷 Upload an image", type=["jpg", "jpeg", "png", "webp"])
 text_fallback = st.text_input("🔤 Optional text prompt (context or fallback)", "")
 
@@ -91,7 +94,7 @@ if _MIC_IMPL:
             audio_mime = "audio/wav"
             st.audio(audio_bytes, format="audio/wav")
 else:
-    st.info("Mic component not installed. Upload a voice file instead.")
+    st.info("No mic component installed. Upload a voice file instead.")
     up = st.file_uploader(
         "Upload voice file (WAV/MP3/OGG/WEBM/M4A)",
         type=["wav", "mp3", "ogg", "webm", "m4a"],
@@ -104,13 +107,13 @@ else:
 
 go = st.button("🧠 Analyze & Speak")
 
-# ---------- Main ----------
+# ======= Main =======
 if go:
     # --- Secrets-only key ---
     try:
         api_key = st.secrets["GOOGLE_API_KEY"]
     except Exception:
-        st.error("`GOOGLE_API_KEY` not found in secrets. See setup below.")
+        st.error("`GOOGLE_API_KEY` not found in `.streamlit/secrets.toml`.")
         st.stop()
 
     if not img_file:
