@@ -14,7 +14,7 @@ div[data-testid="stToolbar"] { display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 st.title("🕶️ Smart Glasses Assistant (Image + Voice → Auto-Speak)")
-st.caption("Reads GOOGLE_API_KEY from `.streamlit/secrets.toml` only.")
+
 
 # ----- Mic components (optional) -----
 _MIC = None
@@ -167,3 +167,4 @@ if replay and st.session_state["last_mp3"]:
 # Auto-speak if enabled and we have audio
 if st.session_state["auto_speak"] and st.session_state["last_mp3"]:
     speak_autoplay(st.session_state["last_mp3"])
+
