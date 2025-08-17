@@ -1,4 +1,7 @@
 streamlit
 google-generativeai
-python-dotenv 
-supabase
+gtts
+Pillow
+st_audiorec
+SpeechRecognition
+pydub
