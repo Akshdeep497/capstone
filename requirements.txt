@@ -2,6 +2,6 @@ streamlit
 google-generativeai
 gtts
 Pillow
-streamlit-audiorec
+mic-recorder-to-streamlit
 SpeechRecognition
 pydub
