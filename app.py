@@ -29,35 +29,30 @@ st.title("🕶️ Smart Glasses Assistant (Camera/Upload + Voice → Auto-Speak)
 
 # ---------- Helpers ----------
 def tts_bytes(text: str) -> bytes:
-    buf = BytesIO()
-    gTTS(text).write_to_fp(buf)
-    buf.seek(0)
-    return buf.read()
+    buf = BytesIO(); gTTS(text).write_to_fp(buf); buf.seek(0); return buf.read()
 
 def guess_mime(name: str, default="application/octet-stream") -> str:
-    m, _ = mimetypes.guess_type(name)
-    return m or default
+    m, _ = mimetypes.guess_type(name); return m or default
 
 def speak_autoplay(mp3_bytes: bytes):
-    if not mp3_bytes:
-        return
+    if not mp3_bytes: return
     b64 = base64.b64encode(mp3_bytes).decode()
     st.session_state["audio_counter"] = st.session_state.get("audio_counter", 0) + 1
     aid = f"tts_audio_{st.session_state['audio_counter']}"
-    st.markdown(f"""
-    <audio id="{aid}" autoplay>
-      <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
-    </audio>
-    <script>const a=document.getElementById("{aid}"); if(a){{a.play().catch(()=>{{}});}}</script>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f"""<audio id="{aid}" autoplay>
+               <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
+            </audio>
+            <script>const a=document.getElementById("{aid}"); if(a){{a.play().catch(()=>{{}});}}</script>""",
+        unsafe_allow_html=True,
+    )
 
 def generate_with_gemini(parts, model_name="gemini-2.5-flash", timeout=90) -> str:
     model = genai.GenerativeModel(model_name)
     try:
         resp = model.generate_content(parts, request_options={"timeout": timeout})
         txt = (getattr(resp, "text", "") or "").strip()
-        if txt:
-            return txt
+        if txt: return txt
         raise RuntimeError("Empty response text.")
     except Exception:
         has_audio = any(isinstance(p, dict) and str(p.get("mime_type","")).startswith("audio/") for p in parts)
@@ -65,8 +60,7 @@ def generate_with_gemini(parts, model_name="gemini-2.5-flash", timeout=90) -> st
             model = genai.GenerativeModel("gemini-1.5-flash")
             resp = model.generate_content(parts, request_options={"timeout": timeout})
             txt = (getattr(resp, "text", "") or "").strip()
-            if txt:
-                return txt
+            if txt: return txt
         raise
 
 def wav_from_int16_mono(samples: np.ndarray, sample_rate: int) -> bytes:
@@ -194,6 +188,7 @@ st.caption('Say **"hey capture"** to snap & describe. Chrome recommended.')
 st.session_state["voice_mode"] = st.toggle(
     "Enable voice-triggered capture", value=st.session_state["voice_mode"]
 )
+force_turn = st.checkbox("Force TURN (relay only)", value=False, help="Use when behind strict firewalls/NAT.")
 
 if not _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
     st.info("Voice capture requires: streamlit-webrtc and aiortc. Install deps and restart.")
@@ -203,9 +198,10 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
         def __init__(self):
             self.last_rgb = None
         def transform(self, frame):
-            img = frame.to_ndarray(format="bgr24")[:, :, ::-1]  # BGR->RGB
-            self.last_rgb = img
-            return frame  # pass-through
+            bgr = frame.to_ndarray(format="bgr24")
+            rgb = bgr[:, :, ::-1]
+            self.last_rgb = rgb
+            return rgb  # show live video
 
     class VADBuffer(AudioProcessorBase):
         def __init__(self):
@@ -216,7 +212,6 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
         def recv(self, frame):
             arr = frame.to_ndarray()
             ch = arr[0] if arr.ndim == 2 else arr
-            # normalize
             if ch.dtype == np.int16:
                 f = ch.astype(np.float32) / 32768.0
             elif ch.dtype == np.int32:
@@ -239,11 +234,28 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
             self.last_pull_ts = now
             return np.array(data, dtype=np.int16), self.sample_rate
 
+    # ---- ICE servers (STUN/TURN) ----
+    stun = [
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+        "stun:stun2.l.google.com:19302",
+    ]
+    turn_urls = [u.strip() for u in st.secrets.get("TURN_URLS", "").split(",") if u.strip()]
+    turn_user = st.secrets.get("TURN_USERNAME", "")
+    turn_pass = st.secrets.get("TURN_PASSWORD", "")
+    ice_servers = [{"urls": stun}]
+    if turn_urls:
+        ice_servers.append({"urls": turn_urls, "username": turn_user, "credential": turn_pass})
+    rtc_config = {"iceServers": ice_servers}
+    if force_turn:
+        rtc_config["iceTransportPolicy"] = "relay"
+
     webrtc_ctx = webrtc_streamer(
         key="voice-cam",
         video_transformer_factory=FrameGrabber,
         audio_processor_factory=VADBuffer,
         media_stream_constraints={"video": True, "audio": True},
+        rtc_configuration=rtc_config,
         async_processing=True,
     )
 
