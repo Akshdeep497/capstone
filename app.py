@@ -1,4 +1,5 @@
-import base64, mimetypes, time, wave
+# app.py
+import base64, mimetypes, time, wave, re
 from collections import deque
 from io import BytesIO
 
@@ -8,7 +9,7 @@ import streamlit as st
 from gtts import gTTS
 import google.generativeai as genai
 
-# Optional WebRTC (video+audio) for voice-triggered capture
+# WebRTC (optional; for voice-triggered capture)
 try:
     from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, AudioProcessorBase
     _VOICE_CAPTURE_AVAILABLE = True
@@ -17,51 +18,53 @@ except Exception:
 
 from streamlit_autorefresh import st_autorefresh
 
-# ---------- Page (no sidebar) ----------
+# ============ Page (no sidebar) ============
 st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
 st.markdown("""
 <style>
-section[data-testid="stSidebar"] { display:none !important; }
-div[data-testid="stToolbar"] { display:none !important; }
+section[data-testid="stSidebar"]{display:none!important;}
+div[data-testid="stToolbar"]{display:none!important;}
 </style>
 """, unsafe_allow_html=True)
 st.title("🕶️ Smart Glasses Assistant (Camera/Upload + Voice → Auto-Speak)")
 
-# ---------- Helpers ----------
+# ============ Helpers ============
 def tts_bytes(text: str) -> bytes:
-    buf = BytesIO(); gTTS(text).write_to_fp(buf); buf.seek(0); return buf.read()
+    buf = BytesIO()
+    gTTS(text).write_to_fp(buf)
+    buf.seek(0)
+    return buf.read()
 
 def guess_mime(name: str, default="application/octet-stream") -> str:
-    m, _ = mimetypes.guess_type(name); return m or default
+    m, _ = mimetypes.guess_type(name)
+    return m or default
 
 def speak_autoplay(mp3_bytes: bytes):
     if not mp3_bytes: return
     b64 = base64.b64encode(mp3_bytes).decode()
     st.session_state["audio_counter"] = st.session_state.get("audio_counter", 0) + 1
     aid = f"tts_audio_{st.session_state['audio_counter']}"
-    st.markdown(
-        f"""<audio id="{aid}" autoplay>
-               <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
-            </audio>
-            <script>const a=document.getElementById("{aid}"); if(a){{a.play().catch(()=>{{}});}}</script>""",
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"""
+    <audio id="{aid}" autoplay>
+      <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
+    </audio>
+    <script>const a=document.getElementById("{aid}"); if(a){{a.play().catch(()=>{{}});}}</script>
+    """, unsafe_allow_html=True)
 
 def generate_with_gemini(parts, model_name="gemini-2.5-flash", timeout=90) -> str:
     model = genai.GenerativeModel(model_name)
-    try:
+    resp = model.generate_content(parts, request_options={"timeout": timeout})
+    txt = (getattr(resp, "text", "") or "").strip()
+    if txt:
+        return txt
+    # retry with 1.5 for audio-heavy prompts
+    if any(isinstance(p, dict) and str(p.get("mime_type","")).startswith("audio/") for p in parts):
+        model = genai.GenerativeModel("gemini-1.5-flash")
         resp = model.generate_content(parts, request_options={"timeout": timeout})
         txt = (getattr(resp, "text", "") or "").strip()
-        if txt: return txt
+    if not txt:
         raise RuntimeError("Empty response text.")
-    except Exception:
-        has_audio = any(isinstance(p, dict) and str(p.get("mime_type","")).startswith("audio/") for p in parts)
-        if has_audio and model_name != "gemini-1.5-flash":
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            resp = model.generate_content(parts, request_options={"timeout": timeout})
-            txt = (getattr(resp, "text", "") or "").strip()
-            if txt: return txt
-        raise
+    return txt
 
 def wav_from_int16_mono(samples: np.ndarray, sample_rate: int) -> bytes:
     bio = BytesIO()
@@ -70,25 +73,27 @@ def wav_from_int16_mono(samples: np.ndarray, sample_rate: int) -> bytes:
         wf.writeframes(samples.tobytes())
     return bio.getvalue()
 
-# ---------- State ----------
+def norm_text(s: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).strip()
+
+# ============ State ============
 st.session_state.setdefault("auto_speak", True)
 st.session_state.setdefault("last_mp3", b"")
 st.session_state.setdefault("last_trigger_ts", 0.0)
 st.session_state.setdefault("voice_mode", False)
+st.session_state.setdefault("last_heard", "")
 
-# ================= Manual Mode =================
+# ============ Manual Mode ============
 st.header("Manual Mode")
 
-# Image: upload or one-shot camera
-img_file = st.file_uploader("📁 Upload image", type=["jpg", "jpeg", "png", "webp"])
+img_file = st.file_uploader("📁 Upload image", type=["jpg","jpeg","png","webp"])
 cam = st.camera_input("Or take a photo")
 if cam is not None:
     img_file = cam
 
-# Optional text
 text_fallback = st.text_input("🔤 Optional text prompt (short)", "")
 
-# Voice (record/upload)
+# Mic recorder (optional)
 _MIC = None
 try:
     from streamlit_mic_recorder import mic_recorder as _mic1
@@ -119,17 +124,18 @@ else:
     if up:
         audio_bytes = up.read(); audio_mime = guess_mime(up.name, "audio/wav"); st.audio(audio_bytes, format=audio_mime)
 
-c1, c2, c3 = st.columns([1, 1, 1])
+c1, c2, c3 = st.columns([1,1,1])
 with c1: analyze = st.button("🧠 Analyze & Speak")
-with c2: stop    = st.button("🛑 Stop")
-with c3: replay  = st.button("🔁 Speak Again")
+with c2: stop = st.button("🛑 Stop")
+with c3: replay = st.button("🔁 Speak Again")
 
 if analyze:
     st.session_state["auto_speak"] = True
     try:
         api_key = st.secrets["GOOGLE_API_KEY"]
     except Exception:
-        st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
+        st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml")
+        st.stop()
 
     if not img_file:
         st.error("Provide an image (upload or camera)."); st.stop()
@@ -140,7 +146,7 @@ if analyze:
 
     STYLE_BRIEF = (
         "STYLE:\n- Default: ≤2 sentences or ≤40 words.\n"
-        "- Expand ONLY if user asks for more.\n"
+        "- Expand only if user asks for more.\n"
         "- ≤3 bullets if listing. No filler.\n"
         "- Ask ONE short clarifying question if image is ambiguous.\n"
         "- Transcribe audio internally; don't show transcript unless asked."
@@ -153,8 +159,7 @@ if analyze:
     if cam is not None:
         img_bytes = cam.getvalue(); img_mime = "image/jpeg"
     else:
-        img_bytes = img_file.read()
-        img_mime = guess_mime(getattr(img_file, "name", "image.jpg"), "image/jpeg")
+        img_bytes = img_file.read(); img_mime = guess_mime(getattr(img_file, "name", "image.jpg"), "image/jpeg")
     if not img_mime.startswith("image/"): st.error(f"Unsupported image type: {img_mime}"); st.stop()
     parts.append({"mime_type": img_mime, "data": img_bytes})
     if audio_bytes and audio_mime:
@@ -169,8 +174,7 @@ if analyze:
     st.subheader("🧾 Response")
     st.write(reply or "(No text)")
     try:
-        mp3 = tts_bytes(reply or "I could not generate a response.")
-        st.session_state["last_mp3"] = mp3
+        st.session_state["last_mp3"] = tts_bytes(reply or "I could not generate a response.")
     except Exception as e:
         st.warning(f"TTS failed: {e}")
         st.session_state["last_mp3"] = b""
@@ -182,79 +186,63 @@ if replay and st.session_state["last_mp3"]:
 if st.session_state["auto_speak"] and st.session_state["last_mp3"]:
     speak_autoplay(st.session_state["last_mp3"])
 
-# ================= Voice Capture Mode (say "hey capture") =================
+# ============ Voice Capture Mode (say "hey capture") ============
 st.header("Voice Capture Mode (beta)")
 st.caption('Say **"hey capture"** to snap & describe. Chrome recommended.')
-st.session_state["voice_mode"] = st.toggle(
-    "Enable voice-triggered capture", value=st.session_state["voice_mode"]
-)
+st.session_state["voice_mode"] = st.toggle("Enable voice-triggered capture", value=st.session_state["voice_mode"])
+show_heard = st.checkbox("Show heard words (debug)", value=False)
 
 if not _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
-    st.info("Voice capture requires: streamlit-webrtc and aiortc. Install deps and restart.")
+    st.info("Voice capture requires: streamlit-webrtc and aiortc.")
 elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
 
     class FrameGrabber(VideoTransformerBase):
-        def __init__(self):
-            self.last_rgb = None
+        def __init__(self): self.last_rgb = None
         def transform(self, frame):
+            # Keep original video on screen, just store RGB for capture
             bgr = frame.to_ndarray(format="bgr24")
-            rgb = bgr[:, :, ::-1]
-            self.last_rgb = rgb
-            return rgb  # show live video
+            self.last_rgb = bgr[:, :, ::-1]
+            return frame
 
     class VADBuffer(AudioProcessorBase):
         def __init__(self):
             self.sample_rate = 16000
-            self.buffer = deque(maxlen=16000 * 4)  # ~4s
+            self.buffer = deque(maxlen=16000 * 4)  # ~4s ring buffer
             self.last_rms = 0.0
             self.last_pull_ts = 0.0
         def recv(self, frame):
             arr = frame.to_ndarray()
             ch = arr[0] if arr.ndim == 2 else arr
-            if ch.dtype == np.int16:
-                f = ch.astype(np.float32) / 32768.0
-            elif ch.dtype == np.int32:
-                f = ch.astype(np.float32) / 2147483648.0
-            else:
-                f = ch.astype(np.float32)
+            if ch.dtype == np.int16: f = ch.astype(np.float32) / 32768.0
+            elif ch.dtype == np.int32: f = ch.astype(np.float32) / 2147483648.0
+            else: f = ch.astype(np.float32)
             self.sample_rate = frame.sample_rate or 16000
             self.last_rms = float(np.sqrt(np.mean(f * f) + 1e-9))
             i16 = np.clip(f * 32767.0, -32768, 32767).astype(np.int16)
             self.buffer.extend(i16.tolist())
             return frame
-        def get_recent_chunk(self, seconds: float = 1.6):
+        def get_recent_chunk(self, seconds: float = 1.8):
             now = time.time()
-            if now - self.last_pull_ts < 2.0:
-                return None, None
+            if now - self.last_pull_ts < 2.0: return None, None
             n = int(seconds * self.sample_rate)
-            if len(self.buffer) < int(0.6 * self.sample_rate):
-                return None, None
+            if len(self.buffer) < int(0.6 * self.sample_rate): return None, None
             data = list(self.buffer)[-n:]
             self.last_pull_ts = now
             return np.array(data, dtype=np.int16), self.sample_rate
 
-    # ---- ICE servers (STUN first; TURN only if configured) ----
-    stun = [
-        "stun:stun.l.google.com:19302",
-        "stun:stun1.l.google.com:19302",
-        "stun:stun2.l.google.com:19302",
-    ]
+    # ICE servers (STUN first; TURN only if configured)
+    stun = ["stun:stun.l.google.com:19302","stun:stun1.l.google.com:19302","stun:stun2.l.google.com:19302"]
     turn_urls = [u.strip() for u in st.secrets.get("TURN_URLS", "").split(",") if u.strip()]
     turn_user = st.secrets.get("TURN_USERNAME", "")
     turn_pass = st.secrets.get("TURN_PASSWORD", "")
     HAS_TURN = bool(turn_urls and turn_user and turn_pass)
 
-    force_turn = st.checkbox(
-        "Force TURN (relay only)",
-        value=False,
-        disabled=not HAS_TURN,
-        help="Needs TURN_URLS/USERNAME/PASSWORD in secrets.",
-    )
+    force_turn = st.checkbox("Force TURN (relay only)", value=False, disabled=not HAS_TURN,
+                             help="Needs TURN_URLS/USERNAME/PASSWORD in secrets.")
 
     ice_servers = [{"urls": stun}]
     if HAS_TURN:
         ice_servers.append({"urls": turn_urls, "username": turn_user, "credential": turn_pass})
-
     rtc_config = {"iceServers": ice_servers}
     if HAS_TURN and force_turn:
         rtc_config["iceTransportPolicy"] = "relay"
@@ -266,6 +254,7 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
         media_stream_constraints={"video": True, "audio": True},
         rtc_configuration=rtc_config,
         async_processing=True,
+        sendback_audio=False,  # prevent echo
     )
 
     # Poll while playing
@@ -275,10 +264,10 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
         vad = webrtc_ctx.audio_processor
         grab = webrtc_ctx.video_transformer
 
-        if vad is not None and grab is not None and vad.last_rms > 0.02:
-            samples, sr = vad.get_recent_chunk(1.6)
+        if vad is not None and grab is not None and vad.last_rms > 0.01:
+            samples, sr = vad.get_recent_chunk(1.8)
             if samples is not None:
-                # Transcribe small chunk; look for hotword
+                # Transcribe and look for hotword
                 try:
                     api_key = st.secrets["GOOGLE_API_KEY"]
                 except Exception:
@@ -294,11 +283,17 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
                     transcript = generate_with_gemini(parts_t, model_name="gemini-1.5-flash")
                 except Exception:
                     transcript = ""
-                phrase = (transcript or "").strip().lower()
+                phrase = norm_text(transcript)
+                st.session_state["last_heard"] = phrase
+                if show_heard:
+                    st.caption(f"Heard: {phrase}")
 
-                # Trigger on "hey capture"
+                # Accept variants (e.g., 'hey capture', 'hey, capture')
+                HOTWORDS = ["hey capture", "hey capture now", "capture", "hey picture", "take picture"]
+                hit = any(hw in phrase for hw in HOTWORDS)
+
                 now = time.time()
-                if "hey capture" in phrase and (now - st.session_state["last_trigger_ts"] > 2.5):
+                if hit and (now - st.session_state["last_trigger_ts"] > 2.5):
                     st.session_state["last_trigger_ts"] = now
                     if getattr(grab, "last_rgb", None) is not None:
                         buf = BytesIO()
