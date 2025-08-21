@@ -8,3 +8,4 @@ streamlit-mic-recorder
 audio-recorder-streamlit
 streamlit-webrtc
 aiortc
+streamlit-autorefresh
