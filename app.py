@@ -188,7 +188,6 @@ st.caption('Say **"hey capture"** to snap & describe. Chrome recommended.')
 st.session_state["voice_mode"] = st.toggle(
     "Enable voice-triggered capture", value=st.session_state["voice_mode"]
 )
-force_turn = st.checkbox("Force TURN (relay only)", value=False, help="Use when behind strict firewalls/NAT.")
 
 if not _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
     st.info("Voice capture requires: streamlit-webrtc and aiortc. Install deps and restart.")
@@ -234,7 +233,7 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
             self.last_pull_ts = now
             return np.array(data, dtype=np.int16), self.sample_rate
 
-    # ---- ICE servers (STUN/TURN) ----
+    # ---- ICE servers (STUN first; TURN only if configured) ----
     stun = [
         "stun:stun.l.google.com:19302",
         "stun:stun1.l.google.com:19302",
@@ -243,11 +242,21 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
     turn_urls = [u.strip() for u in st.secrets.get("TURN_URLS", "").split(",") if u.strip()]
     turn_user = st.secrets.get("TURN_USERNAME", "")
     turn_pass = st.secrets.get("TURN_PASSWORD", "")
+    HAS_TURN = bool(turn_urls and turn_user and turn_pass)
+
+    force_turn = st.checkbox(
+        "Force TURN (relay only)",
+        value=False,
+        disabled=not HAS_TURN,
+        help="Needs TURN_URLS/USERNAME/PASSWORD in secrets.",
+    )
+
     ice_servers = [{"urls": stun}]
-    if turn_urls:
+    if HAS_TURN:
         ice_servers.append({"urls": turn_urls, "username": turn_user, "credential": turn_pass})
+
     rtc_config = {"iceServers": ice_servers}
-    if force_turn:
+    if HAS_TURN and force_turn:
         rtc_config["iceTransportPolicy"] = "relay"
 
     webrtc_ctx = webrtc_streamer(
