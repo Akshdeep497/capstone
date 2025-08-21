@@ -1,6 +1,10 @@
 streamlit
 google-generativeai
 gTTS
-python-dotenv
 streamlit-mic-recorder
 audio-recorder-streamlit
+streamlit-webrtc
+av
+numpy
+pillow
+streamlit-browser-speech
