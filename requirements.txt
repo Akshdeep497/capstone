@@ -1,10 +1,11 @@
 streamlit
 google-generativeai
 gTTS
+numpy
+pillow
+av
 streamlit-mic-recorder
 audio-recorder-streamlit
 streamlit-webrtc
-av
-numpy
-pillow
+aiortc
 streamlit-browser-speech
