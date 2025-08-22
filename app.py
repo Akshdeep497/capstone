@@ -52,9 +52,9 @@ genai.configure(api_key=API_KEY)
 # ---------- State ----------
 st.session_state.setdefault("last_mp3", b"")
 st.session_state.setdefault("auto_speak", True)
-st.session_state.setdefault("last_event_id", None)  # to avoid duplicate processing
+st.session_state.setdefault("last_event_id", None)  # avoid duplicate processing
 
-# ---------- Snapshot handler (USED BY HOTWORD MODE) ----------
+# ---------- Snapshot handler (shared) ----------
 def handle_snapshot(image_data_url: str):
     """
     Decode DataURL -> bytes, send fixed prompt + image to Gemini,
@@ -148,7 +148,6 @@ if enable_hotword:
     live_div = "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""
     live_update = "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);" if show_live else ""
 
-    # Use placeholders to avoid brace issues in JS inside Python strings.
     html_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
@@ -162,7 +161,6 @@ if enable_hotword:
       function sendValue(val){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:JSON.stringify(val)}, '*');}
       function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').trim();}
 
-      // Camera
       const video = document.getElementById('v');
       let stream = null;
       async function startCam(){
@@ -174,7 +172,6 @@ if enable_hotword:
         }
       }
 
-      // Speech
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recog = null; let listening=false; let lastFinal="";
       function startSR(){
@@ -217,26 +214,97 @@ if enable_hotword:
 
       document.getElementById('startBtn').onclick=()=>{ startCam(); startSR(); };
       document.getElementById('stopBtn').onclick =()=>{ stopSR(); if(stream) stream.getTracks().forEach(t=>t.stop()); };
-      // auto start
       startCam(); startSR();
     </script>
     """
-
     html = html_tpl.replace("%%LIVE_DIV%%", live_div).replace("%%LIVE_UPDATE%%", live_update)
-    result = components.html(html, height=520 if show_live else 420, scrolling=False)
+    result_voice = components.html(html, height=520 if show_live else 420, scrolling=False)
 
-    # Process events
-    if result:
+    if result_voice:
         try:
-            data = json.loads(result)
+            data = json.loads(result_voice)
         except Exception:
             data = {}
-
         if data.get("event") == "error":
             st.warning(data.get("message","(unknown error)"))
-
         elif data.get("event") == "capture" and data.get("image"):
             event_id = data.get("id") or int(time.time()*1000)
             if event_id != st.session_state.get("last_event_id"):
                 st.session_state["last_event_id"] = event_id
-                handle_snapshot(data["image"])  # <---- do the prompt+image → Gemini → speak
+                handle_snapshot(data["image"])
+
+# ================= Keyboard Capture Mode (press 'c') =================
+st.header("Keyboard Capture Mode")
+st.caption("Enable, then press **C** to capture (or click the in-frame button).")
+
+enable_kbd = st.toggle("Enable keyboard capture", value=False)
+
+if enable_kbd:
+    key_tpl = """
+    <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
+      <button id="startBtn2" style="padding:6px 12px;border-radius:8px;">Start Camera</button>
+      <button id="stopBtn2"  style="padding:6px 12px;border-radius:8px;">Stop Camera</button>
+      <button id="capBtn2"   style="padding:6px 12px;border-radius:8px;">Capture (C)</button>
+      <span id="status2" style="margin-left:8px;color:#aaa;">idle</span>
+    </div>
+    <video id="v2" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
+    <script>
+      function sendValue(val){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:JSON.stringify(val)}, '*');}
+
+      const video = document.getElementById('v2');
+      let stream = null;
+
+      async function startCam(){
+        try{
+          stream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+          video.srcObject = stream;
+          document.getElementById('status2').textContent='ready — press C to capture';
+        }catch(e){
+          sendValue({event:'error', message:'camera error: '+e});
+        }
+      }
+      function stopCam(){
+        if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+        document.getElementById('status2').textContent='stopped';
+      }
+
+      function capture(){
+        if(!video.videoWidth) return;
+        const c=document.createElement('canvas');
+        c.width=video.videoWidth; c.height=video.videoHeight;
+        const ctx=c.getContext('2d'); ctx.drawImage(video,0,0,c.width,c.height);
+        const dataURL=c.toDataURL('image/jpeg',0.92);
+        const eid = Date.now();
+        sendValue({event:'capture', id:eid, image:dataURL});
+      }
+
+      document.getElementById('startBtn2').onclick = startCam;
+      document.getElementById('stopBtn2').onclick  = stopCam;
+      document.getElementById('capBtn2').onclick   = capture;
+
+      // Key listener: press 'c' to capture
+      window.addEventListener('keydown', (e)=>{
+        if((e.key||'').toLowerCase() === 'c'){
+          e.preventDefault();
+          capture();
+        }
+      });
+
+      // auto start camera for convenience
+      startCam();
+    </script>
+    """
+    result_kbd = components.html(key_tpl, height=460, scrolling=False)
+
+    if result_kbd:
+        try:
+            data2 = json.loads(result_kbd)
+        except Exception:
+            data2 = {}
+        if data2.get("event") == "error":
+            st.warning(data2.get("message","(unknown error)"))
+        elif data2.get("event") == "capture" and data2.get("image"):
+            event_id = data2.get("id") or int(time.time()*1000)
+            if event_id != st.session_state.get("last_event_id"):
+                st.session_state["last_event_id"] = event_id
+                handle_snapshot(data2["image"])
