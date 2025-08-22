@@ -105,16 +105,15 @@ if replay and st.session_state.get("last_mp3"):
 if st.session_state.get("auto_speak", True) and st.session_state.get("last_mp3"):
     speak_autoplay(st.session_state["last_mp3"])
 
-# ================= Browser Hotword Mode (no WebRTC) =================
+# ================= Browser Hotword Mode (poll sessionStorage) =================
 st.header("Browser Hotword Mode (no WebRTC)")
-st.caption('Say **"capture"** → we snap, set the fixed prompt, then run the same Analyze & Speak pipeline.')
+st.caption('Say **"capture"** → we snap, set the fixed prompt, then run Analyze & Speak automatically.')
 
 enable_hotword = st.toggle("Enable browser wake-word", value=False)
 show_live = st.checkbox("Show live transcript", value=True)
 
 if enable_hotword:
-    # Periodic rerun so posted values are consumed reliably on older Streamlit
-    st_autorefresh(interval=1000, key="hotword_poll")
+    st_autorefresh(interval=1500, key="hotword_poll")
 
     live_div = (
         "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>"
@@ -125,7 +124,6 @@ if enable_hotword:
         if show_live else ""
     )
 
-    # Use custom placeholders; no `%` formatting, no f-strings.
     html_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
@@ -137,24 +135,11 @@ if enable_hotword:
     <video id="v" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
     %%LIVE_DIV%%
     <script>
-      function push(val){
-        try { if (window.Streamlit && Streamlit.setComponentReady) Streamlit.setComponentReady(); } catch(e){}
-        try { if (window.Streamlit && Streamlit.setFrameHeight) Streamlit.setFrameHeight(document.body.scrollHeight); } catch(e){}
-        try { if (window.Streamlit && Streamlit.setComponentValue) { Streamlit.setComponentValue(val); return; } } catch(e){}
-        window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:val}, '*');
-      }
       const CACHE_KEY = 'hotword_last_payload';
-      function sendValue(obj){
-        const val = JSON.stringify(obj);
-        try { sessionStorage.setItem(CACHE_KEY, val); } catch(e){}
-        push(val);
+
+      function pushPayload(obj){
+        try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(obj)); } catch(e){}
       }
-      setInterval(()=>{
-        try{
-          const val = sessionStorage.getItem(CACHE_KEY);
-          if (val) push(val);
-        }catch(e){}
-      }, 800);
 
       const HOT = ['capture'];
       const FIXED_PROMPT_JS = %%PROMPT%%;
@@ -168,19 +153,16 @@ if enable_hotword:
         try{
           stream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
           video.srcObject = stream;
-        }catch(e){ sendValue({event:'error', message:'camera error: '+e}); }
+        }catch(e){ pushPayload({event:'error', message:'camera error: '+e}); }
       }
 
       // Speech
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recog = null; let lastFinal="";
       function startSR(){
-        if(!SR){ sendValue({event:'error', message:'Web Speech API not supported'}); return; }
+        if(!SR){ pushPayload({event:'error', message:'Web Speech API not supported'}); return; }
         recog = new SR();
         recog.continuous = true; recog.interimResults = true; recog.lang = 'en-US';
-        recog.onstart = ()=>{ document.getElementById('status').textContent='listening…'; };
-        recog.onerror = e=>{ sendValue({event:'error', message:'speech error: '+(e && e.error ? e.error : 'unknown')}); };
-        recog.onend = ()=>{ document.getElementById('status').textContent='stopped'; };
         recog.onresult = (ev)=>{
           let interim = '';
           for(let i=ev.resultIndex;i<ev.results.length;i++){
@@ -189,7 +171,7 @@ if enable_hotword:
           }
           %%LIVE_UPDATE%%
           const test = norm(lastFinal + ' ' + interim);
-          if (HOT.some(hw => test.includes(hw)) || /\\bcapture\\b/.test(test)) takeAndSend();
+          if (HOT.some(hw => test.includes(hw))) takeAndSend();
         };
         try { recog.start(); } catch (e) {}
       }
@@ -206,8 +188,7 @@ if enable_hotword:
         c.getContext('2d').drawImage(video,0,0,w,h);
         const dataURL=c.toDataURL('image/jpeg',0.5);
         const ts = Date.now();
-        // Emulate manual mode: fill prompt + trigger analyze on Python side
-        sendValue({event:'capture', image:dataURL, ts, prompt: FIXED_PROMPT_JS});
+        pushPayload({event:'capture', image:dataURL, ts, prompt: FIXED_PROMPT_JS});
         sent.textContent = 'sent!'; setTimeout(()=>sent.textContent='', 800);
         lastFinal='';
       }
@@ -215,25 +196,35 @@ if enable_hotword:
       document.getElementById('startBtn').onclick=()=>{ startCam(); startSR(); };
       document.getElementById('snapBtn').onclick =()=>{ takeAndSend(); };
       document.getElementById('stopBtn').onclick =()=>{ stopSR(); };
-      // auto start
       startCam(); startSR();
     </script>
     """
 
-    # Safely inject placeholders (no % or f-strings)
     html = (
         html_tpl
         .replace("%%LIVE_DIV%%", live_div)
         .replace("%%LIVE_UPDATE%%", live_update)
-        .replace("%%PROMPT%%", json.dumps(FIXED_PROMPT))  # proper JS string literal
+        .replace("%%PROMPT%%", json.dumps(FIXED_PROMPT))
     )
+    components.html(html, height=520 if show_live else 440, scrolling=False)
 
-    result = components.html(html, height=520 if show_live else 440, scrolling=False)
+    # Poll sessionStorage via a small JS snippet → write to DOM hidden element
+    storage = st.text_input("Hidden bridge", key="storage_bridge", label_visibility="collapsed")
 
-    # Consume latest payload
-    if result:
+    js_bridge = """
+    <script>
+      const val = sessionStorage.getItem('hotword_last_payload');
+      if(val){
+        const el = window.parent.document.querySelector('input#storage_bridge');
+        if(el){ el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }
+      }
+    </script>
+    """
+    st.markdown(js_bridge, unsafe_allow_html=True)
+
+    if storage:
         try:
-            data = json.loads(result) if isinstance(result, str) else (result if isinstance(result, dict) else {})
+            data = json.loads(storage)
         except Exception:
             data = {}
         if data.get("event") == "error":
@@ -242,14 +233,8 @@ if enable_hotword:
             ts = int(data.get("ts", 0))
             if ts > st.session_state["last_capture_ts"]:
                 st.session_state["last_capture_ts"] = ts
-
-                # 1) Put fixed prompt into the same input as manual mode
                 st.session_state["text_prompt"] = data.get("prompt") or FIXED_PROMPT
-
-                # 2) Decode snapshot and show
                 b64 = data["image"].split(",", 1)[1]
                 img_bytes = base64.b64decode(b64)
                 st.image(img_bytes, caption="Snapshot (Voice)", use_container_width=True)
-
-                # 3) Run the same analyze pipeline
                 run_analyze(img_bytes, "image/jpeg", st.session_state["text_prompt"], header="🧾 Voice Capture Response")
