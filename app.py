@@ -9,7 +9,6 @@ import streamlit as st
 from gtts import gTTS
 import google.generativeai as genai
 
-# WebRTC (voice-triggered capture)
 try:
     from streamlit_webrtc import webrtc_streamer, WebRtcMode
     _VOICE_OK = True
@@ -112,7 +111,7 @@ if _MIC:
         if audio_bytes: audio_mime = "audio/wav"; st.audio(audio_bytes, format="audio/wav")
 else:
     up = st.file_uploader("Or upload voice (WAV/MP3/OGG/WEBM/M4A)", type=["wav","mp3","ogg","webm","m4a"], key="au")
-    if up: audio_bytes = up.read(); audio_mime = guess_mime(up.name, "audio/wav"); st.audio(audio_bytes, format=audio_mime)
+    if up: audio_bytes = up.read(); audio_mime = guess_mime(up.name, "audio/wav"); st.audio(audio_bytes, format="audio/wav")
 
 c1, c2, c3 = st.columns([1,1,1])
 with c1: analyze = st.button("🧠 Analyze & Speak")
@@ -152,6 +151,7 @@ st.header("Voice Capture Mode (beta)")
 st.caption('Say **"hey capture"** to snap & describe. Chrome recommended.')
 st.session_state["voice_mode"] = st.toggle("Enable voice-triggered capture", value=st.session_state["voice_mode"])
 show_heard = st.checkbox("Show heard words (debug)", value=True)
+mic_boost = st.checkbox("Boost mic (AGC/NS/EC)", value=False)
 
 if not _VOICE_OK and st.session_state["voice_mode"]:
     st.info("Voice capture needs streamlit-webrtc + aiortc installed.")
@@ -159,12 +159,11 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
 
     # --- Hotword + ASR tuning ---
     HOTWORDS = ["hey capture", "capture", "take picture", "hey picture", "hey capture now"]
-    RMS_SPEECH = 0.01          # gate low-noise pulls
-    CHUNK_SEC = 3.0            # longer chunk => fewer blanks
-    PULL_MIN_GAP = 0.8         # seconds between pulls
-    OVERLAP_FACTOR = 0.5       # encourage overlap
+    RMS_SPEECH = 0.006          # lower gate to catch quiet mics
+    CHUNK_SEC = 3.5             # longer window reduces blanks
+    PULL_MIN_GAP = 0.8
+    OVERLAP_FACTOR = 0.5
 
-    # ---- Thread-safe audio ring (callback API) ----
     class AudioRing:
         def __init__(self):
             self.lock = threading.Lock()
@@ -205,7 +204,7 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
 
     def video_cb(frame):
         bgr = frame.to_ndarray(format="bgr24")
-        st.session_state["last_rgb"] = bgr[:, :, ::-1]   # keep RGB
+        st.session_state["last_rgb"] = bgr[:, :, ::-1]
         return frame
 
     def audio_cb(frame):
@@ -225,19 +224,23 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
     rtc_config = {"iceServers": ice_servers}
     if HAS_TURN and force_turn: rtc_config["iceTransportPolicy"] = "relay"
 
+    audio_constraints = True
+    if mic_boost:
+        audio_constraints = {"echoCancellation": True, "noiseSuppression": True, "autoGainControl": True, "channelCount": 1}
+
     ctx = webrtc_streamer(
         key="voice-cam",
-        mode=WebRtcMode.SENDONLY,             # ensure the browser sends mic frames
+        mode=WebRtcMode.SENDONLY,
         video_frame_callback=video_cb,
         audio_frame_callback=audio_cb,
-        media_stream_constraints={"video": True, "audio": True},
+        media_stream_constraints={"video": True, "audio": audio_constraints},
         rtc_configuration=rtc_config,
         async_processing=True,
         sendback_audio=False,
     )
 
     if ctx.state.playing:
-        st_autorefresh(interval=900, key="vc_poll2")  # poll a bit faster
+        st_autorefresh(interval=900, key="vc_poll2")
 
         if show_heard:
             st.caption(f"Frames: {ring.frames} | RMS: {ring.last_rms:.4f} | chunk: {ring.last_chunk_len}")
@@ -256,6 +259,7 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
                     wav_bytes = wav_from_int16(samples, sr)
                     parts_t = [
                         ("transcribe this audio in lowercase only. "
+                         "return just the words you hear. "
                          "if you clearly hear the phrase 'hey capture', output exactly 'hey capture'."),
                         {"mime_type": "audio/wav", "data": wav_bytes},
                     ]
@@ -266,18 +270,16 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
                     raw = (transcript or "").strip()
                     phrase = norm_text(raw)
 
-                    # fuzzy hotword match
-                    best_ratio, best_hw = max(
-                        (difflib.SequenceMatcher(None, phrase, hw).ratio(), hw) for hw in HOTWORDS
-                    )
-                    hotword = best_hw if (best_ratio >= 0.74 or any(hw in phrase for hw in HOTWORDS)) else None
+                    # robust hotword check
+                    match_sub = any(tok in phrase for tok in ["capture", "captur", "picture"])
+                    best_ratio, best_hw = max((difflib.SequenceMatcher(None, phrase, hw).ratio(), hw) for hw in HOTWORDS)
+                    hotword = best_hw if (best_ratio >= 0.74 or match_sub) else None
 
                     st.session_state["last_heard"] = phrase
                     if show_heard:
                         st.caption(f"Heard (raw): {raw or '—'}")
                         st.caption(f"Heard (norm): {phrase or '—'} | hotword: {hotword or '—'}")
 
-                    # trigger photo + describe
                     if hotword and (time.time() - st.session_state["last_trigger_ts"] > 2.5):
                         st.session_state["last_trigger_ts"] = time.time()
                         if st.session_state["last_rgb"] is not None:
