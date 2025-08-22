@@ -1,22 +1,14 @@
 # app.py
-import base64, json, mimetypes
+import base64, mimetypes
 from io import BytesIO
-
 import streamlit as st
-from PIL import Image
 from gtts import gTTS
+from PIL import Image
 import google.generativeai as genai
-import streamlit.components.v1 as components
 
 # ---------- Page ----------
 st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
-st.markdown("""
-<style>
-section[data-testid="stSidebar"]{display:none!important;}
-div[data-testid="stToolbar"]{display:none!important;}
-</style>
-""", unsafe_allow_html=True)
-st.title("🕶️ Smart Glasses Assistant (Camera/Upload + Voice → Auto-Speak)")
+st.title("🕶️ Smart Glasses Assistant")
 
 # ---------- Helpers ----------
 def guess_mime(name: str, default="application/octet-stream") -> str:
@@ -37,74 +29,83 @@ def speak_autoplay(mp3_bytes: bytes):
     <script>document.getElementById("{aid}")?.play?.().catch(()=>{{}})</script>
     """, unsafe_allow_html=True)
 
-def gen_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
+def gen_gemini(parts, model="gemini-2.5-flash") -> str:
     m = genai.GenerativeModel(model)
-    r = m.generate_content(parts, request_options={"timeout": timeout})
+    r = m.generate_content(parts)
     return (getattr(r, "text", "") or "").strip()
 
 # ---------- State ----------
 st.session_state.setdefault("last_mp3", b"")
 st.session_state.setdefault("auto_speak", True)
 
-# ================= Manual Mode =================
-st.header("Manual Mode")
+# ================= Manual Capture =================
+st.header("Manual Mode (Upload/Camera/Keypress)")
 
-# Camera element always active
-html_cam = """
-<video id="manualCam" autoplay playsinline muted style="width:100%;max-width:480px;border-radius:10px;background:#111"></video>
+# File or camera
+uploaded = st.file_uploader("📁 Upload image", type=["jpg","jpeg","png","webp"])
+captured = st.camera_input("📸 Or take a photo")
+
+if captured is not None:
+    img_file = captured
+else:
+    img_file = uploaded
+
+text_prompt = st.text_input("Optional extra text", "")
+
+# Buttons
+col1, col2, col3 = st.columns([1,1,1])
+with col1: btn_analyze = st.button("🧠 Analyze & Speak")
+with col2: btn_stop = st.button("🛑 Stop Audio")
+with col3: btn_replay = st.button("🔁 Replay")
+
+# Keyboard shortcut 'c'
+st.markdown("""
 <script>
-  const vid = document.getElementById("manualCam");
-  navigator.mediaDevices.getUserMedia({video:true,audio:false}).then(s=>{vid.srcObject=s;});
-  function snapManual(){
-    if(!vid.videoWidth) return null;
-    const c=document.createElement("canvas");
-    c.width=vid.videoWidth; c.height=vid.videoHeight;
-    c.getContext("2d").drawImage(vid,0,0,c.width,c.height);
-    return c.toDataURL("image/jpeg",0.92);
+document.addEventListener("keydown", function(e){
+  if(e.key === "c" || e.key === "C"){
+    const btns = window.parent.document.querySelectorAll('button');
+    for (let b of btns){ if(b.innerText.includes("Analyze")){ b.click(); break; } }
   }
-  window.snapManual = snapManual;
+});
 </script>
-"""
-components.html(html_cam, height=360)
-
-text_prompt = st.text_input("🔤 Optional text prompt (short)", "")
-btn_analyze = st.button("📸 Analyze Camera & Speak")
+""", unsafe_allow_html=True)
 
 if btn_analyze:
-    # Grab snapshot from camera
-    js = """
-    <script>
-    const dataURL = window.snapManual ? window.snapManual() : null;
-    if(dataURL){window.parent.postMessage(
-      {isStreamlitMessage:true,type:'streamlit:setComponentValue',value:dataURL}, '*');}
-    </script>
-    """
-    result = components.html(js, height=0)
-    if result:
-        try:
-            dataURL = json.loads(result)
-            img_bytes = base64.b64decode(dataURL.split(",",1)[1])
-        except:
-            img_bytes = None
+    if not img_file:
+        st.error("Please upload or capture an image.")
+    else:
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        if not api_key:
+            st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml")
+            st.stop()
+        genai.configure(api_key=api_key)
 
-        if img_bytes:
-            api_key = st.secrets.get("GOOGLE_API_KEY")
-            if not api_key:
-                st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml")
-                st.stop()
-            genai.configure(api_key=api_key)
+        # Read image
+        if captured is not None:
+            img_bytes, img_mime = captured.getvalue(), "image/jpeg"
+        else:
+            img_bytes, img_mime = img_file.read(), guess_mime(img_file.name, "image/jpeg")
 
-            parts = [
-                "You are an AI smart glasses assistant. Describe in ≤2 sentences.",
-                {"mime_type":"image/jpeg","data": img_bytes}
-            ]
-            if text_prompt.strip():
-                parts.append(f"User note: {text_prompt.strip()}")
+        parts = [
+            "Describe briefly what is in front of me (≤2 sentences).",
+            {"mime_type": img_mime, "data": img_bytes}
+        ]
+        if text_prompt.strip():
+            parts.append(f"User note: {text_prompt.strip()}")
 
-            with st.spinner("Analyzing snapshot..."):
-                reply = gen_gemini(parts) or "I couldn't generate a response."
+        with st.spinner("Analyzing..."):
+            reply = gen_gemini(parts) or "I couldn't generate a response."
 
-            st.subheader("🧾 Response"); st.write(reply)
-            mp3 = tts_bytes(reply)
-            st.session_state["last_mp3"] = mp3
+        st.subheader("🧾 Response")
+        st.write(reply)
+
+        mp3 = tts_bytes(reply)
+        st.session_state["last_mp3"] = mp3
+        if st.session_state.get("auto_speak", True):
             speak_autoplay(mp3)
+
+if btn_stop:
+    st.session_state["auto_speak"] = False
+if btn_replay and st.session_state["last_mp3"]:
+    st.session_state["auto_speak"] = True
+    speak_autoplay(st.session_state["last_mp3"])
