@@ -46,7 +46,6 @@ def gen_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
     return (getattr(r, "text", "") or "").strip()
 
 def run_analyze(img_bytes: bytes, img_mime: str = "image/jpeg", user_text: str | None = None, header: str = "🧾 Response"):
-    """Shared pipeline used by Manual Analyze and Voice Capture."""
     api_key = st.secrets.get("GOOGLE_API_KEY")
     if not api_key:
         st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
@@ -54,21 +53,21 @@ def run_analyze(img_bytes: bytes, img_mime: str = "image/jpeg", user_text: str |
 
     parts = [
         ("You are an AI smart glasses assistant. "
-         "Keep answers ≤2 sentences (≤40 words). "
-         "No filler. Up to 3 bullets if listing.")]
+         "Keep answers ≤2 sentences (≤40 words). No filler. Up to 3 bullets if listing.")
+    ]
     parts.append({"mime_type": img_mime, "data": img_bytes})
     if user_text and user_text.strip():
         parts.append(f"Additional user text: {user_text.strip()}")
 
     with st.spinner("Thinking..."):
         reply = gen_gemini(parts) or "I couldn't see enough to describe it."
-    st.subheader(header)
-    st.write(reply)
+    st.subheader(header); st.write(reply)
 
     try:
         mp3 = tts_bytes(reply)
         st.session_state["last_mp3"] = mp3
-        if st.session_state.get("auto_speak", True): speak_autoplay(mp3)
+        if st.session_state.get("auto_speak", True):
+            speak_autoplay(mp3)
     except Exception as e:
         st.warning(f"TTS failed: {e}")
 
@@ -80,7 +79,6 @@ st.session_state.setdefault("text_prompt", "")
 
 # ================= Manual Mode =================
 st.header("Manual Mode")
-
 img_file = st.file_uploader("📁 Upload image", type=["jpg","jpeg","png","webp"])
 cam = st.camera_input("Or take a photo")
 if cam is not None: img_file = cam
@@ -102,23 +100,32 @@ if go:
     run_analyze(img_bytes, img_mime, st.session_state["text_prompt"], header="🧾 Response")
 
 if stop: st.session_state["auto_speak"] = False
-if replay and st.session_state.get("last_mp3"): st.session_state["auto_speak"] = True
-if st.session_state.get("auto_speak", True) and st.session_state.get("last_mp3"): speak_autoplay(st.session_state["last_mp3"])
+if replay and st.session_state.get("last_mp3"):
+    st.session_state["auto_speak"] = True
+if st.session_state.get("auto_speak", True) and st.session_state.get("last_mp3"):
+    speak_autoplay(st.session_state["last_mp3"])
 
 # ================= Browser Hotword Mode (no WebRTC) =================
 st.header("Browser Hotword Mode (no WebRTC)")
-st.caption('Say **"capture"** → we snap a photo, set the prompt to the fixed line, then run **Analyze & Speak** automatically.')
+st.caption('Say **"capture"** → we snap, set the fixed prompt, then run the same Analyze & Speak pipeline.')
 
 enable_hotword = st.toggle("Enable browser wake-word", value=False)
 show_live = st.checkbox("Show live transcript", value=True)
 
 if enable_hotword:
-    # Ensure Streamlit consumes posted values even if it doesn't auto-rerun
+    # Periodic rerun so posted values are consumed reliably on older Streamlit
     st_autorefresh(interval=1000, key="hotword_poll")
 
-    live_div = "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""
-    live_update = "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);" if show_live else ""
+    live_div = (
+        "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>"
+        if show_live else ""
+    )
+    live_update = (
+        "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);"
+        if show_live else ""
+    )
 
+    # Use custom placeholders; no `%` formatting, no f-strings.
     html_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
@@ -130,12 +137,10 @@ if enable_hotword:
     <video id="v" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
     %%LIVE_DIV%%
     <script>
-      // Streamlit bridge (works old & new)
       function push(val){
         try { if (window.Streamlit && Streamlit.setComponentReady) Streamlit.setComponentReady(); } catch(e){}
         try { if (window.Streamlit && Streamlit.setFrameHeight) Streamlit.setFrameHeight(document.body.scrollHeight); } catch(e){}
         try { if (window.Streamlit && Streamlit.setComponentValue) { Streamlit.setComponentValue(val); return; } } catch(e){}
-        // fallback
         window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:val}, '*');
       }
       const CACHE_KEY = 'hotword_last_payload';
@@ -152,6 +157,7 @@ if enable_hotword:
       }, 800);
 
       const HOT = ['capture'];
+      const FIXED_PROMPT_JS = %%PROMPT%%;
       const sent = document.getElementById('sent');
       function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').trim();}
 
@@ -194,15 +200,14 @@ if enable_hotword:
 
       function takeAndSend(){
         if(!video.videoWidth) return;
-        // downscale for tiny payload
         const maxW = 320, scale = Math.min(1, maxW / video.videoWidth);
         const w = Math.round(video.videoWidth * scale), h = Math.round(video.videoHeight * scale);
         const c=document.createElement('canvas'); c.width=w; c.height=h;
         c.getContext('2d').drawImage(video,0,0,w,h);
         const dataURL=c.toDataURL('image/jpeg',0.5);
         const ts = Date.now();
-        // emulate: set prompt to fixed + analyze
-        sendValue({event:'capture', image:dataURL, ts, prompt:"%s"});
+        // Emulate manual mode: fill prompt + trigger analyze on Python side
+        sendValue({event:'capture', image:dataURL, ts, prompt: FIXED_PROMPT_JS});
         sent.textContent = 'sent!'; setTimeout(()=>sent.textContent='', 800);
         lastFinal='';
       }
@@ -213,8 +218,16 @@ if enable_hotword:
       // auto start
       startCam(); startSR();
     </script>
-    """ % FIXED_PROMPT.replace('"', '\\"')
-    html = html_tpl.replace("%%LIVE_DIV%%", live_div).replace("%%LIVE_UPDATE%%", live_update)
+    """
+
+    # Safely inject placeholders (no % or f-strings)
+    html = (
+        html_tpl
+        .replace("%%LIVE_DIV%%", live_div)
+        .replace("%%LIVE_UPDATE%%", live_update)
+        .replace("%%PROMPT%%", json.dumps(FIXED_PROMPT))  # proper JS string literal
+    )
+
     result = components.html(html, height=520 if show_live else 440, scrolling=False)
 
     # Consume latest payload
@@ -230,13 +243,13 @@ if enable_hotword:
             if ts > st.session_state["last_capture_ts"]:
                 st.session_state["last_capture_ts"] = ts
 
-                # 1) Put fixed prompt into the same input field as manual mode
+                # 1) Put fixed prompt into the same input as manual mode
                 st.session_state["text_prompt"] = data.get("prompt") or FIXED_PROMPT
 
-                # 2) Decode snapshot
+                # 2) Decode snapshot and show
                 b64 = data["image"].split(",", 1)[1]
                 img_bytes = base64.b64decode(b64)
                 st.image(img_bytes, caption="Snapshot (Voice)", use_container_width=True)
 
-                # 3) Run the exact same pipeline as "Analyze & Speak"
+                # 3) Run the same analyze pipeline
                 run_analyze(img_bytes, "image/jpeg", st.session_state["text_prompt"], header="🧾 Voice Capture Response")
