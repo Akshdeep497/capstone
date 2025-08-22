@@ -65,10 +65,10 @@ if btn_analyze:
     api_key = st.secrets.get("GOOGLE_API_KEY")
     if not api_key:
         st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
+    genai.configure(api_key=api_key)
+
     if not img_file:
         st.error("Provide an image (upload or camera)."); st.stop()
-
-    genai.configure(api_key=api_key)
 
     parts = [
         ("You are an AI smart glasses assistant. "
@@ -103,83 +103,84 @@ enable_hotword = st.toggle("Enable browser wake-word", value=False)
 show_live = st.checkbox("Show live transcript", value=True)
 
 if enable_hotword:
-    # Minimal component: SpeechRecognition + getUserMedia(video) + snapshot + postMessage to Streamlit
-    html = f"""
+    live_div = "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""
+    live_update = "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);" if show_live else ""
+
+    # Use placeholders to avoid f-string/format brace issues.
+    html_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
       <button id="stopBtn"  style="padding:6px 12px;border-radius:8px;">Stop</button>
       <span id="status" style="margin-left:8px;color:#aaa;">idle</span>
     </div>
     <video id="v" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
-    {"<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""}
+    %%LIVE_DIV%%
     <script>
       const HOT = ['hey capture','capture','take picture','hey picture','hey capture now'];
-      function sendValue(val){window.parent.postMessage({{isStreamlitMessage:true,type:'streamlit:setComponentValue',value:JSON.stringify(val)}}, '*');}
-      function norm(s){{return (s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').trim();}}
+      function sendValue(val){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:JSON.stringify(val)}, '*');}
+      function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').trim();}
 
       // Camera
       const video = document.getElementById('v');
       let stream = null;
-      async function startCam(){{
-        try {{
-          stream = await navigator.mediaDevices.getUserMedia({{video:true,audio:false}});
+      async function startCam(){
+        try{
+          stream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
           video.srcObject = stream;
-        }} catch(e) {{
-          sendValue({{event:'error', message:'camera error: '+e}});
-        }}
-      }}
+        }catch(e){
+          sendValue({event:'error', message:'camera error: '+e});
+        }
+      }
 
       // Speech
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recog = null; let listening=false; let lastFinal="";
-      function startSR(){{
-        if(!SR){{ sendValue({{event:'error', message:'Web Speech API not supported'}}); return; }}
+      function startSR(){
+        if(!SR){ sendValue({event:'error', message:'Web Speech API not supported'}); return; }
         recog = new SR();
         recog.continuous = true;
         recog.interimResults = true;
         recog.lang = 'en-US';
-        recog.onstart = ()=>{{listening=true; document.getElementById('status').textContent='listening…';}};
-        recog.onerror = e=>{{sendValue({{event:'error', message:'speech error: '+(e?.error||'unknown')}});}};
-        recog.onend = ()=>{{listening=false; document.getElementById('status').textContent='stopped';}};
-        recog.onresult = (ev)=>{{
+        recog.onstart = ()=>{listening=true; document.getElementById('status').textContent='listening…';};
+        recog.onerror = e=>{sendValue({event:'error', message:'speech error: '+(e?.error||'unknown')});};
+        recog.onend = ()=>{listening=false; document.getElementById('status').textContent='stopped';};
+        recog.onresult = (ev)=>{
           let interim = '';
-          for(let i=ev.resultIndex;i<ev.results.length;i++) {{
+          for(let i=ev.resultIndex;i<ev.results.length;i++) {
             const t = ev.results[i][0].transcript;
             if(ev.results[i].isFinal) lastFinal += ' ' + t;
             else interim += t;
-          }}
-          const live = `{ " " if show_live else "" }`;
-          if(live){{
-            const el=document.getElementById('live');
-            if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);
-          }}
+          }
+          %%LIVE_UPDATE%%
           const test = norm((lastFinal + ' ' + interim));
-          const hit = HOT.some(hw => test.includes(hw)) || /\\bcaptur(e|a)?\\b/.test(test);
+          const hit = HOT.some(hw => test.includes(hw)) || /\bcaptur(e|a)?\b/.test(test);
           if(hit) takeAndSend();
-        }};
-        try{{recog.start();}}catch(_){{}}
-      }}
-      function stopSR(){{
-        if(recog) try{{recog.stop();}}catch(_){}
-      }}
+        };
+        try{recog.start();}catch(_){}
+      }
+      function stopSR(){
+        if(recog) try{recog.stop();}catch(_){}
+      }
 
-      function takeAndSend(){{
+      function takeAndSend(){
         if(!video.videoWidth) return;
         const c=document.createElement('canvas');
         c.width=video.videoWidth; c.height=video.videoHeight;
         const ctx=c.getContext('2d'); ctx.drawImage(video,0,0,c.width,c.height);
         const dataURL=c.toDataURL('image/jpeg',0.92);
-        sendValue({{event:'capture', image:dataURL, heard:lastFinal}});
-        lastFinal='';  // reset window
-      }}
+        sendValue({event:'capture', image:dataURL, heard:lastFinal});
+        lastFinal='';
+      }
 
-      document.getElementById('startBtn').onclick=()=>{{ startCam(); startSR(); }};
-      document.getElementById('stopBtn').onclick =()=>{{ stopSR(); if(stream) stream.getTracks().forEach(t=>t.stop()); }};
-      // auto start on load (mimics toggle)
+      document.getElementById('startBtn').onclick=()=>{ startCam(); startSR(); };
+      document.getElementById('stopBtn').onclick =()=>{ stopSR(); if(stream) stream.getTracks().forEach(t=>t.stop()); };
+      // auto start
       startCam(); startSR();
     </script>
     """
-    result = components.html(html, height=show_live and 520 or 420, scrolling=False)
+
+    html = html_tpl.replace("%%LIVE_DIV%%", live_div).replace("%%LIVE_UPDATE%%", live_update)
+    result = components.html(html, height=520 if show_live else 420, scrolling=False)
 
     if result:
         try:
@@ -189,12 +190,12 @@ if enable_hotword:
         if data.get("event") == "error":
             st.warning(data.get("message","(unknown error)"))
         elif data.get("event") == "capture" and data.get("image"):
-            # Decode image
+            # Decode snapshot
             b64 = data["image"].split(",",1)[1]
             img_bytes = base64.b64decode(b64)
             st.image(img_bytes, caption="Snapshot", use_container_width=True)
 
-            # Gemini: fixed concise prompt
+            # Gemini call
             api_key = st.secrets.get("GOOGLE_API_KEY")
             if not api_key:
                 st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
