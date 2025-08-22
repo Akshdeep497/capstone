@@ -1,3 +1,4 @@
+# app.py
 import base64, json, mimetypes
 from io import BytesIO
 
@@ -5,6 +6,7 @@ import streamlit as st
 from gtts import gTTS
 import google.generativeai as genai
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 FIXED_PROMPT = "Describe what is in front of me in few words."
 
@@ -40,15 +42,20 @@ def gen_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
     r = m.generate_content(parts, request_options={"timeout": timeout})
     return (getattr(r, "text", "") or "").strip()
 
+# ----- State -----
 st.session_state.setdefault("last_mp3", b"")
 st.session_state.setdefault("auto_speak", True)
+st.session_state.setdefault("last_capture_ts", 0)
 
-# ---------- Manual mode ----------
+# ================= Manual Mode =================
 st.header("Manual Mode")
+
 img_file = st.file_uploader("📁 Upload image", type=["jpg","jpeg","png","webp"])
 cam = st.camera_input("Or take a photo")
 if cam is not None: img_file = cam
+
 text_prompt = st.text_input("🔤 Optional text prompt (short)", "")
+
 c1, c2, c3 = st.columns(3)
 with c1: go = st.button("🧠 Analyze & Speak")
 with c2: stop = st.button("🛑 Stop")
@@ -60,9 +67,8 @@ if go:
     genai.configure(api_key=api_key)
     if not img_file: st.error("Provide an image (upload or camera)."); st.stop()
 
-    parts = ["You are an AI smart glasses assistant. "
-             "Default answers must be concise (≤2 sentences, ≤40 words). "
-             "Expand ONLY if asked. ≤3 bullets when listing."]
+    parts = ["You are an AI smart glasses assistant. Default answers: ≤2 sentences (≤40 words). "
+             "Expand ONLY if asked. ≤3 bullets when listing. Ask one short clarifying question only if needed."]
     if cam is not None:
         img_bytes, img_mime = cam.getvalue(), "image/jpeg"
     else:
@@ -79,13 +85,17 @@ if stop: st.session_state["auto_speak"] = False
 if replay and st.session_state["last_mp3"]: st.session_state["auto_speak"] = True
 if st.session_state["auto_speak"] and st.session_state["last_mp3"]: speak_autoplay(st.session_state["last_mp3"])
 
-# ---------- Browser hotword mode (no WebRTC) ----------
+# ================= Browser Hotword Mode (no WebRTC) =================
 st.header("Browser Hotword Mode (no WebRTC)")
 st.caption('Say **"capture"** to snap & describe. Chrome/Edge recommended.')
-enable = st.toggle("Enable browser wake-word", value=False)
+
+enable_hotword = st.toggle("Enable browser wake-word", value=False)
 show_live = st.checkbox("Show live transcript", value=True)
 
-if enable:
+if enable_hotword:
+    # Force periodic reruns so posted values are consumed even if your build doesn't auto-rerun.
+    st_autorefresh(interval=1000, limit=0, key="hotword_poll")
+
     live_div = "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""
     live_update = "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);" if show_live else ""
 
@@ -111,7 +121,6 @@ if enable:
       }
       function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').trim();}
 
-      // Camera
       const video = document.getElementById('v');
       let stream = null;
       async function startCam(){
@@ -123,7 +132,6 @@ if enable:
         }
       }
 
-      // Speech
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recog = null; let listening=false; let lastFinal="";
       function startSR(){
@@ -156,10 +164,19 @@ if enable:
 
       function takeAndSend(){
         if(!video.videoWidth) return;
+
+        // Downscale to max width 640 to keep payload tiny
+        const maxW = 640;
+        const scale = Math.min(1, maxW / video.videoWidth);
+        const w = Math.round(video.videoWidth * scale);
+        const h = Math.round(video.videoHeight * scale);
+
         const c=document.createElement('canvas');
-        c.width=video.videoWidth; c.height=video.videoHeight;
-        const ctx=c.getContext('2d'); ctx.drawImage(video,0,0,c.width,c.height);
-        const dataURL=c.toDataURL('image/jpeg',0.7); // keep payload small
+        c.width=w; c.height=h;
+        const ctx=c.getContext('2d');
+        ctx.drawImage(video,0,0,w,h);
+
+        const dataURL=c.toDataURL('image/jpeg',0.6);
         sendValue({event:'capture', image:dataURL, ts: Date.now()});
         sent.textContent = 'sent!';
         setTimeout(()=>sent.textContent='', 800);
@@ -170,7 +187,7 @@ if enable:
       document.getElementById('snapBtn').onclick =()=>{ takeAndSend(); };
       document.getElementById('stopBtn').onclick =()=>{ stopSR(); };
 
-      // auto start on load
+      // auto start
       startCam(); startSR();
     </script>
     """
@@ -185,25 +202,35 @@ if enable:
         if data.get("event") == "error":
             st.warning(data.get("message", "(unknown error)"))
         elif data.get("event") == "capture" and data.get("image"):
-            b64 = data["image"].split(",", 1)[1]
-            img_bytes = base64.b64decode(b64)
-            st.image(img_bytes, caption="Snapshot", use_container_width=True)
+            # de-dup on timestamp
+            ts = int(data.get("ts", 0))
+            if ts <= st.session_state["last_capture_ts"]:
+                pass
+            else:
+                st.session_state["last_capture_ts"] = ts
 
-            st.session_state["auto_speak"] = True
+                # decode snapshot
+                b64 = data["image"].split(",", 1)[1]
+                img_bytes = base64.b64decode(b64)
+                st.image(img_bytes, caption="Snapshot", use_container_width=True)
 
-            api_key = st.secrets.get("GOOGLE_API_KEY")
-            if not api_key:
-                st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
-            genai.configure(api_key=api_key)
+                # always auto-speak on capture
+                st.session_state["auto_speak"] = True
 
-            parts = [FIXED_PROMPT, {"mime_type": "image/jpeg", "data": img_bytes}]
-            with st.spinner("Analyzing snapshot..."):
-                reply = gen_gemini(parts) or "I couldn't see enough to describe it."
-            st.subheader("🧾 Response"); st.write(reply)
+                # Gemini with fixed prompt
+                api_key = st.secrets.get("GOOGLE_API_KEY")
+                if not api_key:
+                    st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
+                genai.configure(api_key=api_key)
 
-            try:
-                mp3 = tts_bytes(reply)
-                st.session_state["last_mp3"] = mp3
-                speak_autoplay(mp3)
-            except Exception as e:
-                st.warning(f"TTS failed: {e}")
+                parts = [FIXED_PROMPT, {"mime_type": "image/jpeg", "data": img_bytes}]
+                with st.spinner("Analyzing snapshot..."):
+                    reply = gen_gemini(parts) or "I couldn't see enough to describe it."
+                st.subheader("🧾 Response"); st.write(reply)
+
+                try:
+                    mp3 = tts_bytes(reply)
+                    st.session_state["last_mp3"] = mp3
+                    speak_autoplay(mp3)
+                except Exception as e:
+                    st.warning(f"TTS failed: {e}")
