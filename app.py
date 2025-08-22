@@ -1,3 +1,51 @@
+# app.py
+import base64, json, mimetypes
+from io import BytesIO
+
+import streamlit as st
+from PIL import Image
+from gtts import gTTS
+import google.generativeai as genai
+import streamlit.components.v1 as components
+
+# ---------- Page ----------
+st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
+st.markdown("""
+<style>
+section[data-testid="stSidebar"]{display:none!important;}
+div[data-testid="stToolbar"]{display:none!important;}
+</style>
+""", unsafe_allow_html=True)
+st.title("🕶️ Smart Glasses Assistant (Camera/Upload + Voice → Auto-Speak)")
+
+# ---------- Helpers ----------
+def guess_mime(name: str, default="application/octet-stream") -> str:
+    m, _ = mimetypes.guess_type(name); return m or default
+
+def tts_bytes(text: str) -> bytes:
+    buf = BytesIO(); gTTS(text).write_to_fp(buf); buf.seek(0); return buf.read()
+
+def speak_autoplay(mp3_bytes: bytes):
+    if not mp3_bytes: return
+    b64 = base64.b64encode(mp3_bytes).decode()
+    st.session_state["audio_counter"] = st.session_state.get("audio_counter", 0) + 1
+    aid = f"tts_{st.session_state['audio_counter']}"
+    st.markdown(f"""
+    <audio id="{aid}" autoplay>
+      <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
+    </audio>
+    <script>document.getElementById("{aid}")?.play?.().catch(()=>{{}})</script>
+    """, unsafe_allow_html=True)
+
+def gen_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
+    m = genai.GenerativeModel(model)
+    r = m.generate_content(parts, request_options={"timeout": timeout})
+    return (getattr(r, "text", "") or "").strip()
+
+# ---------- State ----------
+st.session_state.setdefault("last_mp3", b"")
+st.session_state.setdefault("auto_speak", True)
+
 # ================= Manual Mode =================
 st.header("Manual Mode")
 
@@ -33,7 +81,6 @@ if btn_analyze:
     """
     result = components.html(js, height=0)
     if result:
-        import base64, json
         try:
             dataURL = json.loads(result)
             img_bytes = base64.b64decode(dataURL.split(",",1)[1])
@@ -42,6 +89,9 @@ if btn_analyze:
 
         if img_bytes:
             api_key = st.secrets.get("GOOGLE_API_KEY")
+            if not api_key:
+                st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml")
+                st.stop()
             genai.configure(api_key=api_key)
 
             parts = [
