@@ -7,6 +7,7 @@ from PIL import Image
 from gtts import gTTS
 import google.generativeai as genai
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 # ---------- Page ----------
 st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
@@ -145,13 +146,15 @@ enable_hotword = st.toggle("Enable browser wake-word", value=False)
 show_live = st.checkbox("Show live transcript", value=True)
 
 if enable_hotword:
+    st_autorefresh(interval=500, key="hotword_poll")
+    
     live_div = "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""
     live_update = "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);" if show_live else ""
 
     html_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
-      <button id="stopBtn"  style="padding:6px 12px;border-radius:8px;">Stop</button>
+      <button id="stopBtn"  style="padding:6px 12px;border-radius:8-px;">Stop</button>
       <span id="status" style="margin-left:8px;color:#aaa;">idle</span>
     </div>
     <video id="v" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
@@ -240,6 +243,9 @@ st.caption("Enable, then press **C** to capture (or click the in-frame button)."
 enable_kbd = st.toggle("Enable keyboard capture", value=False)
 
 if enable_kbd:
+    # ADDED THE AUTOREFRESH HERE
+    st_autorefresh(interval=500, key="keyboard_poll")
+
     key_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn2" style="padding:6px 12px;border-radius:8px;">Start Camera</button>
@@ -282,7 +288,6 @@ if enable_kbd:
       document.getElementById('stopBtn2').onclick  = stopCam;
       document.getElementById('capBtn2').onclick   = capture;
 
-      // Key listener: press 'c' to capture
       window.addEventListener('keydown', (e)=>{
         if((e.key||'').toLowerCase() === 'c'){
           e.preventDefault();
@@ -290,7 +295,6 @@ if enable_kbd:
         }
       });
 
-      // auto start camera for convenience
       startCam();
     </script>
     """
