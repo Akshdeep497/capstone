@@ -1,17 +1,25 @@
 # app.py
-import base64, json
+import base64, json, mimetypes
 from io import BytesIO
-import mimetypes
 
 import streamlit as st
-import google.generativeai as genai
+import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 from gtts import gTTS
+import google.generativeai as genai
 
 # ===== Config =====
 FIXED_PROMPT = "Describe what is in front of me in few words."
 
-st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️")
-st.title("🕶️ Smart Glasses Assistant")
+# ===== Page =====
+st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
+st.markdown("""
+<style>
+section[data-testid="stSidebar"]{display:none!important;}
+div[data-testid="stToolbar"]{display:none!important;}
+</style>
+""", unsafe_allow_html=True)
+st.title("🕶️ Smart Glasses Assistant (Camera/Upload + Voice → Auto-Speak)")
 
 # ===== Helpers =====
 def guess_mime(name: str, default="application/octet-stream") -> str:
@@ -21,74 +29,177 @@ def tts_bytes(text: str) -> bytes:
     buf = BytesIO(); gTTS(text).write_to_fp(buf); buf.seek(0); return buf.read()
 
 def speak_autoplay(mp3: bytes):
+    if not mp3: return
     b64 = base64.b64encode(mp3).decode()
+    st.session_state["audio_counter"] = st.session_state.get("audio_counter", 0) + 1
+    aid = f"tts_{st.session_state['audio_counter']}"
     st.markdown(f"""
-    <audio autoplay>
+    <audio id="{aid}" autoplay>
       <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
     </audio>
+    <script>document.getElementById("{aid}")?.play?.().catch(()=>{{}})</script>
     """, unsafe_allow_html=True)
 
-def gen_gemini(parts):
-    api_key = st.secrets.get("GOOGLE_API_KEY")
-    genai.configure(api_key=api_key)
-    m = genai.GenerativeModel("gemini-2.5-flash")
-    r = m.generate_content(parts, request_options={"timeout": 90})
+def gen_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
+    m = genai.GenerativeModel(model)
+    r = m.generate_content(parts, request_options={"timeout": timeout})
     return (getattr(r, "text", "") or "").strip()
 
-def run_analyze(img_bytes: bytes, img_mime: str):
+def run_analyze(img_bytes: bytes, img_mime: str = "image/jpeg", user_text: str | None = None, header: str = "🧾 Response"):
+    api_key = st.secrets.get("GOOGLE_API_KEY")
+    if not api_key:
+        st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
+    genai.configure(api_key=api_key)
+
     parts = [
-        "You are an AI smart glasses assistant. "
-        "Keep answers ≤2 sentences (≤40 words). No filler."
+        ("You are an AI smart glasses assistant. "
+         "Keep answers ≤2 sentences (≤40 words). No filler. Up to 3 bullets if listing.")
     ]
     parts.append({"mime_type": img_mime, "data": img_bytes})
-    reply = gen_gemini(parts) or "I couldn't see enough."
-    st.subheader("🧾 Response")
-    st.write(reply)
-    mp3 = tts_bytes(reply); speak_autoplay(mp3)
+    if user_text and user_text.strip():
+        parts.append(f"Additional user text: {user_text.strip()}")
 
-# ===== Hotword Mode =====
-st.header("Browser Hotword Mode")
-st.caption('Say **"capture"** → snapshot → auto analyze & speak.')
+    with st.spinner("Thinking..."):
+        reply = gen_gemini(parts) or "I couldn't see enough to describe it."
+    st.subheader(header); st.write(reply)
 
-# Bridge input (hidden)
-payload = st.text_area("bridge", key="bridge", label_visibility="collapsed")
-
-# Inject JS: speech+camera → put JSON into hidden input
-st.markdown(f"""
-<video id="v" autoplay playsinline muted style="width:100%;max-width:400px;border:1px solid #555"></video>
-<div id="status" style="color:#aaa;margin:6px 0;">idle</div>
-<button onclick="takeAndSend()">Snap</button>
-<script>
-  const video = document.getElementById('v');
-  navigator.mediaDevices.getUserMedia({{video:true}}).then(s=>video.srcObject=s);
-
-  const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
-  let recog=new SR(); recog.continuous=true; recog.interimResults=true; recog.lang='en-US';
-  recog.onresult=e=>{let t="";for(let i=e.resultIndex;i<e.results.length;i++)t+=e.results[i][0].transcript;
-                     if(/\\bcapture\\b/i.test(t)) takeAndSend();};
-  recog.start();
-
-  function takeAndSend(){{
-    if(!video.videoWidth) return;
-    let c=document.createElement('canvas'); c.width=320; c.height=240;
-    c.getContext('2d').drawImage(video,0,0,320,240);
-    let dataURL=c.toDataURL('image/jpeg',0.5);
-    let obj={{event:'capture', ts:Date.now(), image:dataURL, prompt:{json.dumps(FIXED_PROMPT)}}};
-    let el=window.parent.document.querySelector('textarea#bridge');
-    if(el){{el.value=JSON.stringify(obj); el.dispatchEvent(new Event('input',{{bubbles:true}}));}}
-    document.getElementById('status').textContent="sent!";
-  }}
-</script>
-""", unsafe_allow_html=True)
-
-# ===== Consume payload =====
-if payload:
     try:
-        data = json.loads(payload)
-    except Exception:
-        data = {}
-    if data.get("event") == "capture":
-        b64 = data["image"].split(",",1)[1]
-        img_bytes = base64.b64decode(b64)
-        st.image(img_bytes, caption="Snapshot", use_container_width=True)
-        run_analyze(img_bytes, "image/jpeg")
+        mp3 = tts_bytes(reply)
+        st.session_state["last_mp3"] = mp3
+        if st.session_state.get("auto_speak", True):
+            speak_autoplay(mp3)
+    except Exception as e:
+        st.warning(f"TTS failed: {e}")
+
+# ===== State =====
+st.session_state.setdefault("last_mp3", b"")
+st.session_state.setdefault("auto_speak", True)
+st.session_state.setdefault("last_capture_ts", 0)
+st.session_state.setdefault("text_prompt", "")
+
+# ================= Manual Mode =================
+st.header("Manual Mode")
+img_file = st.file_uploader("📁 Upload image", type=["jpg","jpeg","png","webp"])
+cam = st.camera_input("Or take a photo")
+if cam is not None: img_file = cam
+
+st.text_input("🔤 Optional text prompt (short)", key="text_prompt")
+
+c1, c2, c3 = st.columns(3)
+with c1: go = st.button("🧠 Analyze & Speak")
+with c2: stop = st.button("🛑 Stop")
+with c3: replay = st.button("🔁 Speak Again")
+
+if go:
+    if not img_file:
+        st.error("Provide an image (upload or camera)."); st.stop()
+    if cam is not None:
+        img_bytes, img_mime = cam.getvalue(), "image/jpeg"
+    else:
+        img_bytes, img_mime = img_file.read(), guess_mime(getattr(img_file, "name", "image.jpg"), "image/jpeg")
+    run_analyze(img_bytes, img_mime, st.session_state["text_prompt"], header="🧾 Response")
+
+if stop: st.session_state["auto_speak"] = False
+if replay and st.session_state.get("last_mp3"):
+    st.session_state["auto_speak"] = True
+if st.session_state.get("auto_speak", True) and st.session_state.get("last_mp3"):
+    speak_autoplay(st.session_state["last_mp3"])
+
+# ================= Browser Hotword Mode (no WebRTC) =================
+st.header("Browser Hotword Mode (no WebRTC)")
+st.caption('Say **"capture"** → we snap, set the fixed prompt, then run the same Analyze & Speak pipeline.')
+
+enable_hotword = st.toggle("Enable browser wake-word", value=False)
+show_live = st.checkbox("Show live transcript", value=True)
+
+if enable_hotword:
+    st_autorefresh(interval=1000, key="hotword_poll")
+
+    live_div = (
+        "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>"
+        if show_live else ""
+    )
+    live_update = (
+        "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);"
+        if show_live else ""
+    )
+
+    prompt_js = json.dumps(FIXED_PROMPT)
+
+    html_tpl = """
+    <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
+      <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
+      <button id="snapBtn"  style="padding:6px 12px;border-radius:8px;">Snap</button>
+      <button id="stopBtn"  style="padding:6px 12px;border-radius:8px;">Stop</button>
+      <span id="status" style="margin-left:8px;color:#aaa;">idle</span>
+      <span id="sent" style="margin-left:10px;color:#7bd389;"></span>
+    </div>
+    <video id="v" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
+    %%LIVE_DIV%%
+    <script>
+      function push(val){
+        window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:val}, '*');
+      }
+      function sendValue(obj){ push(JSON.stringify(obj)); }
+
+      const video=document.getElementById('v');
+      let stream=null;
+      async function startCam(){
+        try{ stream=await navigator.mediaDevices.getUserMedia({video:true}); video.srcObject=stream; }
+        catch(e){ sendValue({event:'error',message:'camera error: '+e}); }
+      }
+
+      const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+      let recog=null,lastFinal="";
+      function startSR(){
+        if(!SR){ sendValue({event:'error',message:'Web Speech API not supported'}); return; }
+        recog=new SR(); recog.continuous=true; recog.interimResults=true; recog.lang='en-US';
+        recog.onresult=(ev)=>{
+          let interim='';
+          for(let i=ev.resultIndex;i<ev.results.length;i++){
+            const t=ev.results[i][0].transcript;
+            if(ev.results[i].isFinal) lastFinal+=' '+t; else interim+=t;
+          }
+          %%LIVE_UPDATE%%
+          if(/\\bcapture\\b/.test(lastFinal+' '+interim)) takeAndSend();
+        };
+        try{recog.start();}catch(e){}
+      }
+      function stopSR(){ try{if(recog)recog.stop();}catch(e){}; try{if(stream)stream.getTracks().forEach(t=>t.stop());}catch(e){}; }
+
+      function takeAndSend(){
+        if(!video.videoWidth) return;
+        const c=document.createElement('canvas'); c.width=320; c.height=240;
+        c.getContext('2d').drawImage(video,0,0,320,240);
+        const dataURL=c.toDataURL('image/jpeg',0.5);
+        sendValue({event:'capture',ts:Date.now(),image:dataURL,prompt:FIXED_PROMPT});
+        document.getElementById('sent').textContent='sent!'; setTimeout(()=>document.getElementById('sent').textContent='',800);
+        lastFinal='';
+      }
+
+      const FIXED_PROMPT = """ + prompt_js + """;
+
+      document.getElementById('startBtn').onclick=()=>{startCam();startSR();};
+      document.getElementById('snapBtn').onclick =()=>{takeAndSend();};
+      document.getElementById('stopBtn').onclick =()=>{stopSR();};
+      startCam(); startSR();
+    </script>
+    """
+
+    html = html_tpl.replace("%%LIVE_DIV%%", live_div).replace("%%LIVE_UPDATE%%", live_update)
+    result = components.html(html, height=520 if show_live else 440, scrolling=False)
+
+    if result:
+        try:
+            data = json.loads(result) if isinstance(result, str) else {}
+        except Exception:
+            data = {}
+        if data.get("event") == "capture" and data.get("image"):
+            ts = int(data.get("ts", 0))
+            if ts > st.session_state["last_capture_ts"]:
+                st.session_state["last_capture_ts"] = ts
+                st.session_state["text_prompt"] = data.get("prompt") or FIXED_PROMPT
+                b64 = data["image"].split(",", 1)[1]
+                img_bytes = base64.b64decode(b64)
+                st.image(img_bytes, caption="Snapshot (Voice)", use_container_width=True)
+                run_analyze(img_bytes, "image/jpeg", st.session_state["text_prompt"], header="🧾 Voice Capture Response")
