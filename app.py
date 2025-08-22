@@ -18,7 +18,7 @@ except Exception:
 
 from streamlit_autorefresh import st_autorefresh
 
-# ---------------- Page (no sidebar) ----------------
+# ---------- Page ----------
 st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
 st.markdown("""
 <style>
@@ -28,7 +28,7 @@ div[data-testid="stToolbar"]{display:none!important;}
 """, unsafe_allow_html=True)
 st.title("🕶️ Smart Glasses Assistant (Camera/Upload + Voice → Auto-Speak)")
 
-# ---------------- Helpers ----------------
+# ---------- Helpers ----------
 def tts_bytes(text: str) -> bytes:
     buf = BytesIO(); gTTS(text).write_to_fp(buf); buf.seek(0); return buf.read()
 
@@ -69,7 +69,7 @@ def wav_from_int16_mono(samples: np.ndarray, sample_rate: int) -> bytes:
 def norm_text(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).strip()
 
-# ---------------- State ----------------
+# ---------- State ----------
 st.session_state.setdefault("auto_speak", True)
 st.session_state.setdefault("last_mp3", b"")
 st.session_state.setdefault("last_trigger_ts", 0.0)
@@ -78,15 +78,12 @@ st.session_state.setdefault("last_heard", "")
 
 # ================= Manual Mode =================
 st.header("Manual Mode")
-
 img_file = st.file_uploader("📁 Upload image", type=["jpg","jpeg","png","webp"])
 cam = st.camera_input("Or take a photo")
-if cam is not None:
-    img_file = cam
-
+if cam is not None: img_file = cam
 text_fallback = st.text_input("🔤 Optional text prompt (short)", "")
 
-# Mic recorder (optional)
+# Mic (optional)
 _MIC = None
 try:
     from streamlit_mic_recorder import mic_recorder as _mic1; _MIC = ("smr", _mic1)
@@ -108,12 +105,10 @@ if _MIC:
     else:
         st.caption("Click the mic button to record.")
         audio_bytes = mic_fn(pause_threshold=2.0)
-        if audio_bytes:
-            audio_mime = "audio/wav"; st.audio(audio_bytes, format="audio/wav")
+        if audio_bytes: audio_mime = "audio/wav"; st.audio(audio_bytes, format="audio/wav")
 else:
     up = st.file_uploader("Or upload voice (WAV/MP3/OGG/WEBM/M4A)", type=["wav","mp3","ogg","webm","m4a"], key="au")
-    if up:
-        audio_bytes = up.read(); audio_mime = guess_mime(up.name, "audio/wav"); st.audio(audio_bytes, format=audio_mime)
+    if up: audio_bytes = up.read(); audio_mime = guess_mime(up.name, "audio/wav"); st.audio(audio_bytes, format=audio_mime)
 
 c1, c2, c3 = st.columns([1,1,1])
 with c1: analyze = st.button("🧠 Analyze & Speak")
@@ -122,42 +117,30 @@ with c3: replay = st.button("🔁 Speak Again")
 
 if analyze:
     st.session_state["auto_speak"] = True
-    try:
-        api_key = st.secrets["GOOGLE_API_KEY"]
-    except Exception:
-        st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
-
+    api_key = st.secrets.get("GOOGLE_API_KEY")
+    if not api_key: st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
     if not img_file: st.error("Provide an image (upload or camera)."); st.stop()
     if not audio_bytes and not text_fallback.strip(): st.error("Provide a voice prompt or short text."); st.stop()
 
     genai.configure(api_key=api_key)
-
-    STYLE_BRIEF = (
-        "STYLE:\n- Default: ≤2 sentences or ≤40 words.\n"
-        "- Expand only if user asks for more.\n"
-        "- ≤3 bullets if listing. No filler.\n"
-        "- Ask ONE short clarifying question if image is ambiguous.\n"
-        "- Transcribe audio internally; don't show transcript unless asked."
-    )
-    system_context = f"You are an AI smart glasses assistant. Use the image and the user's voice/text to answer.\n{STYLE_BRIEF}"
-    user_hint = f"\nAdditional user text: {text_fallback.strip()}" if text_fallback.strip() else ""
-    final_prompt = f"{system_context}{user_hint}"
+    STYLE_BRIEF = ("STYLE:\n- Default: ≤2 sentences or ≤40 words.\n"
+                   "- Expand only if user asks for more.\n"
+                   "- ≤3 bullets max; no filler.\n"
+                   "- Ask ONE short clarifying question if image is ambiguous.\n"
+                   "- Transcribe audio internally; don't show transcript unless asked.")
+    final_prompt = f"You are an AI smart glasses assistant.\n{STYLE_BRIEF}"
+    if text_fallback.strip(): final_prompt += f"\nAdditional user text: {text_fallback.strip()}"
 
     parts = [final_prompt]
-    if cam is not None:
-        img_bytes = cam.getvalue(); img_mime = "image/jpeg"
-    else:
-        img_bytes = img_file.read(); img_mime = guess_mime(getattr(img_file, "name", "image.jpg"), "image/jpeg")
+    if cam is not None: img_bytes = cam.getvalue(); img_mime = "image/jpeg"
+    else: img_bytes = img_file.read(); img_mime = guess_mime(getattr(img_file, 'name', 'image.jpg'), "image/jpeg")
     if not img_mime.startswith("image/"): st.error(f"Unsupported image type: {img_mime}"); st.stop()
     parts.append({"mime_type": img_mime, "data": img_bytes})
     if audio_bytes and audio_mime: parts.append({"mime_type": audio_mime, "data": audio_bytes})
 
-    with st.spinner("Thinking..."):
-        reply = generate_with_gemini(parts)
-
+    with st.spinner("Thinking..."): reply = generate_with_gemini(parts)
     st.subheader("🧾 Response"); st.write(reply or "(No text)")
-    try: st.session_state["last_mp3"] = tts_bytes(reply or "I could not generate a response.")
-    except Exception as e: st.warning(f"TTS failed: {e}"); st.session_state["last_mp3"] = b""
+    st.session_state["last_mp3"] = tts_bytes(reply or "I could not generate a response.")
 
 if stop: st.session_state["auto_speak"] = False
 if replay and st.session_state["last_mp3"]: st.session_state["auto_speak"] = True
@@ -167,7 +150,7 @@ if st.session_state["auto_speak"] and st.session_state["last_mp3"]: speak_autopl
 st.header("Voice Capture Mode (beta)")
 st.caption('Say **"hey capture"** to snap & describe. Chrome recommended.')
 st.session_state["voice_mode"] = st.toggle("Enable voice-triggered capture", value=st.session_state["voice_mode"])
-show_heard = st.checkbox("Show heard words (debug)", value=True)  # default ON for reliability
+show_heard = st.checkbox("Show heard words (debug)", value=True)
 
 if not _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
     st.info("Voice capture requires: streamlit-webrtc and aiortc.")
@@ -177,8 +160,8 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
         def __init__(self): self.last_rgb = None
         def transform(self, frame):
             bgr = frame.to_ndarray(format="bgr24")
-            self.last_rgb = bgr[:, :, ::-1]   # store RGB for capture
-            return bgr                         # show BGR
+            self.last_rgb = bgr[:, :, ::-1]   # store RGB
+            return bgr                        # display
 
     class VADBuffer(AudioProcessorBase):
         def __init__(self):
@@ -229,49 +212,36 @@ elif _VOICE_CAPTURE_AVAILABLE and st.session_state["voice_mode"]:
         key="voice-cam",
         video_transformer_factory=FrameGrabber,
         audio_processor_factory=VADBuffer,
-        media_stream_constraints={
-            "video": True,
-            "audio": {                 # ensure browser sends mic audio
-                "echoCancellation": True,
-                "noiseSuppression": False,
-                "autoGainControl": False,
-                "channelCount": 1
-            },
-        },
+        media_stream_constraints={"video": True, "audio": True},  # IMPORTANT: plain True for broad compatibility
         rtc_configuration=rtc_config,
         async_processing=True,
         sendback_audio=False,
-        audio_receiver_size=2048,      # smoother audio delivery
+        audio_receiver_size=2048,
     )
 
-    # Poll while playing
     if webrtc_ctx.state.playing:
         st_autorefresh(interval=1200, key="vc_poll")
 
         vad = webrtc_ctx.audio_processor
         grab = webrtc_ctx.video_transformer
 
-        # Live debug
         if show_heard and vad is not None:
             st.caption(f"Frames: {vad.frames_seen} | RMS: {vad.last_rms:.4f} | chunk: {vad.last_chunk_len}")
 
         if vad is not None and grab is not None:
             samples, sr = vad.get_recent_chunk(2.0)
             if samples is not None and (vad.last_rms > 0.001 or show_heard):
-                try:
-                    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-                except Exception:
-                    st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
+                api_key = st.secrets.get("GOOGLE_API_KEY")
+                if not api_key: st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
+                genai.configure(api_key=api_key)
 
                 wav_bytes = wav_from_int16_mono(samples, sr)
                 parts_t = [
                     "transcribe this audio; return the exact words in lowercase.",
                     {"mime_type": "audio/wav", "data": wav_bytes},
                 ]
-                try:
-                    transcript = generate_with_gemini(parts_t, model_name="gemini-1.5-flash")
-                except Exception:
-                    transcript = ""
+                try: transcript = generate_with_gemini(parts_t, model_name="gemini-1.5-flash")
+                except Exception: transcript = ""
                 phrase = norm_text(transcript)
                 st.session_state["last_heard"] = phrase
                 if show_heard: st.caption("Heard: " + phrase)
