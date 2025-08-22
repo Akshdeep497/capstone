@@ -10,7 +10,7 @@ from gtts import gTTS
 import google.generativeai as genai
 
 try:
-    from streamlit_webrtc import webrtc_streamer
+    from streamlit_webrtc import webrtc_streamer, WebRtcMode
     _VOICE_OK = True
 except Exception:
     _VOICE_OK = False
@@ -39,12 +39,13 @@ def speak_autoplay(mp3: bytes):
     b64 = base64.b64encode(mp3).decode()
     st.session_state["audio_counter"] = st.session_state.get("audio_counter", 0) + 1
     aid = f"tts_{st.session_state['audio_counter']}"
-    st.markdown(f"""
-    <audio id="{aid}" autoplay>
-      <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
-    </audio>
-    <script>document.getElementById("{aid}")?.play?.().catch(()=>{{}})</script>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f"""<audio id="{aid}" autoplay>
+               <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
+            </audio>
+            <script>document.getElementById("{aid}")?.play?.().catch(()=>{{}})</script>""",
+        unsafe_allow_html=True,
+    )
 
 def generate_with_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
     m = genai.GenerativeModel(model)
@@ -145,7 +146,7 @@ if stop: st.session_state["auto_speak"] = False
 if replay and st.session_state["last_mp3"]: st.session_state["auto_speak"] = True
 if st.session_state["auto_speak"] and st.session_state["last_mp3"]: speak_autoplay(st.session_state["last_mp3"])
 
-# ================= Voice Capture Mode (hotword) =================
+# ================= Voice Capture Mode =================
 st.header("Voice Capture Mode (beta)")
 st.caption('Say **"hey capture"** to snap & describe. Chrome recommended.')
 st.session_state["voice_mode"] = st.toggle("Enable voice-triggered capture", value=st.session_state["voice_mode"])
@@ -155,7 +156,7 @@ if not _VOICE_OK and st.session_state["voice_mode"]:
     st.info("Voice capture needs streamlit-webrtc + aiortc installed.")
 elif _VOICE_OK and st.session_state["voice_mode"]:
 
-    # ---- Thread-safe audio ring using new callbacks ----
+    # ---- Thread-safe audio ring (new callback API) ----
     class AudioRing:
         def __init__(self):
             self.lock = threading.Lock()
@@ -193,9 +194,8 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
     ring: AudioRing = st.session_state["audioring"]
 
     def video_cb(frame):
-        # store latest RGB for snapshot; show original frame
         bgr = frame.to_ndarray(format="bgr24")
-        st.session_state["last_rgb"] = bgr[:, :, ::-1]
+        st.session_state["last_rgb"] = bgr[:, :, ::-1]   # keep RGB
         return frame
 
     def audio_cb(frame):
@@ -215,10 +215,12 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
     rtc_config = {"iceServers": ice_servers}
     if HAS_TURN and force_turn: rtc_config["iceTransportPolicy"] = "relay"
 
+    # IMPORTANT: SENDONLY ensures the client actually *sends* mic/audio consistently
     ctx = webrtc_streamer(
         key="voice-cam",
-        video_frame_callback=video_cb,      # new callback API
-        audio_frame_callback=audio_cb,      # new callback API (reliable audio)
+        mode=WebRtcMode.SENDONLY,
+        video_frame_callback=video_cb,
+        audio_frame_callback=audio_cb,
         media_stream_constraints={"video": True, "audio": True},
         rtc_configuration=rtc_config,
         async_processing=True,
@@ -231,7 +233,6 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
         if show_heard:
             st.caption(f"Frames: {ring.frames} | RMS: {ring.last_rms:.4f} | chunk: {ring.last_chunk_len}")
 
-        # no mic track at all
         if ring.frames == 0:
             st.error("No microphone frames received. Click the lock icon → Microphone: Allow, then reload.")
         else:
