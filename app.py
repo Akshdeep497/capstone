@@ -1,5 +1,5 @@
 # app.py
-import base64, json, mimetypes
+import base64, json, mimetypes, time
 from io import BytesIO
 
 import streamlit as st
@@ -7,7 +7,6 @@ from PIL import Image
 from gtts import gTTS
 import google.generativeai as genai
 import streamlit.components.v1 as components
-from streamlit_autorefresh import st_autorefresh
 
 # ---------- Page ----------
 st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
@@ -43,10 +42,56 @@ def gen_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
     r = m.generate_content(parts, request_options={"timeout": timeout})
     return (getattr(r, "text", "") or "").strip()
 
+# ---------- Secrets / API ----------
+API_KEY = st.secrets.get("GOOGLE_API_KEY")
+if not API_KEY:
+    st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml")
+    st.stop()
+genai.configure(api_key=API_KEY)
+
 # ---------- State ----------
 st.session_state.setdefault("last_mp3", b"")
 st.session_state.setdefault("auto_speak", True)
-st.session_state.setdefault("last_capture_ts", 0)
+st.session_state.setdefault("last_event_id", None)  # to avoid duplicate processing
+
+# ---------- Snapshot handler (USED BY HOTWORD MODE) ----------
+def handle_snapshot(image_data_url: str):
+    """
+    Decode DataURL -> bytes, send fixed prompt + image to Gemini,
+    display the reply, and speak it.
+    """
+    try:
+        b64 = image_data_url.split(",", 1)[1]
+    except Exception:
+        st.warning("Bad snapshot payload.")
+        return
+
+    img_bytes = base64.b64decode(b64)
+    st.image(img_bytes, caption="Snapshot", use_container_width=True)
+
+    parts = [
+        "Describe what is in front of me in few words.",
+        {"mime_type": "image/jpeg", "data": img_bytes},
+    ]
+
+    with st.spinner("Analyzing snapshot..."):
+        try:
+            reply = gen_gemini(parts) or "I couldn't generate a response."
+        except Exception as e:
+            st.exception(e)
+            reply = "I couldn't generate a response."
+
+    st.subheader("🧾 Response")
+    st.write(reply)
+
+    # Speak
+    try:
+        mp3 = tts_bytes(reply)
+        st.session_state["last_mp3"] = mp3
+        if st.session_state.get("auto_speak", True):
+            speak_autoplay(mp3)
+    except Exception as e:
+        st.warning(f"TTS failed: {e}")
 
 # ================= Manual Mode =================
 st.header("Manual Mode")
@@ -64,11 +109,6 @@ with c2: btn_stop = st.button("🛑 Stop")
 with c3: btn_replay = st.button("🔁 Speak Again")
 
 if btn_analyze:
-    api_key = st.secrets.get("GOOGLE_API_KEY")
-    if not api_key:
-        st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
-    genai.configure(api_key=api_key)
-
     if not img_file:
         st.error("Provide an image (upload or camera)."); st.stop()
 
@@ -105,11 +145,10 @@ enable_hotword = st.toggle("Enable browser wake-word", value=False)
 show_live = st.checkbox("Show live transcript", value=True)
 
 if enable_hotword:
-    st_autorefresh(interval=500, key="hotword_poll")
-
     live_div = "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""
     live_update = "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);" if show_live else ""
 
+    # Use placeholders to avoid brace issues in JS inside Python strings.
     html_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
@@ -122,14 +161,20 @@ if enable_hotword:
       const HOT = ['hey capture','capture','take picture','hey picture','hey capture now'];
       function sendValue(val){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:JSON.stringify(val)}, '*');}
       function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').trim();}
+
+      // Camera
       const video = document.getElementById('v');
       let stream = null;
       async function startCam(){
         try{
           stream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
           video.srcObject = stream;
-        }catch(e){ sendValue({event:'error', message:'camera error: '+e}); }
+        }catch(e){
+          sendValue({event:'error', message:'camera error: '+e});
+        }
       }
+
+      // Speech
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recog = null; let listening=false; let lastFinal="";
       function startSR(){
@@ -150,7 +195,7 @@ if enable_hotword:
           }
           %%LIVE_UPDATE%%
           const test = norm((lastFinal + ' ' + interim));
-          const hit = HOT.some(hw => test.includes(hw)) || /\bcaptur(e|a)?\b/.test(test);
+          const hit = HOT.some(hw => test.includes(hw)) || /\\bcaptur(e|a)?\\b/.test(test);
           if(hit) takeAndSend();
         };
         try{recog.start();}catch(_){}
@@ -158,24 +203,29 @@ if enable_hotword:
       function stopSR(){
         if(recog) try{recog.stop();}catch(_){}
       }
+
       function takeAndSend(){
         if(!video.videoWidth) return;
         const c=document.createElement('canvas');
         c.width=video.videoWidth; c.height=video.videoHeight;
         const ctx=c.getContext('2d'); ctx.drawImage(video,0,0,c.width,c.height);
         const dataURL=c.toDataURL('image/jpeg',0.92);
-        sendValue({event:'capture', image:dataURL, heard:lastFinal, ts: Date.now()}); 
+        const eid = Date.now();
+        sendValue({event:'capture', id:eid, image:dataURL, heard:lastFinal});
         lastFinal='';
       }
+
       document.getElementById('startBtn').onclick=()=>{ startCam(); startSR(); };
       document.getElementById('stopBtn').onclick =()=>{ stopSR(); if(stream) stream.getTracks().forEach(t=>t.stop()); };
       // auto start
       startCam(); startSR();
     </script>
     """
+
     html = html_tpl.replace("%%LIVE_DIV%%", live_div).replace("%%LIVE_UPDATE%%", live_update)
     result = components.html(html, height=520 if show_live else 420, scrolling=False)
 
+    # Process events
     if result:
         try:
             data = json.loads(result)
@@ -184,31 +234,9 @@ if enable_hotword:
 
         if data.get("event") == "error":
             st.warning(data.get("message","(unknown error)"))
+
         elif data.get("event") == "capture" and data.get("image"):
-            ts = int(data.get("ts", 0))
-            if ts > st.session_state["last_capture_ts"]:
-                st.session_state["last_capture_ts"] = ts
-
-                b64 = data["image"].split(",",1)[1]
-                img_bytes = base64.b64decode(b64)
-                st.image(img_bytes, caption="Snapshot", use_container_width=True)
-
-                api_key = st.secrets.get("GOOGLE_API_KEY")
-                if not api_key:
-                    st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
-                genai.configure(api_key=api_key)
-
-                parts = [
-                    "Describe what is in front of me in few words.",
-                    {"mime_type":"image/jpeg","data": img_bytes}
-                ]
-                with st.spinner("Analyzing snapshot..."):
-                    reply = gen_gemini(parts) or "I couldn't generate a response."
-                st.subheader("🧾 Response"); st.write(reply)
-
-                try:
-                    mp3 = tts_bytes(reply)
-                    st.session_state["last_mp3"] = mp3
-                    if st.session_state.get("auto_speak", True): speak_autoplay(mp3)
-                except Exception as e:
-                    st.warning(f"TTS failed: {e}")
+            event_id = data.get("id") or int(time.time()*1000)
+            if event_id != st.session_state.get("last_event_id"):
+                st.session_state["last_event_id"] = event_id
+                handle_snapshot(data["image"])  # <---- do the prompt+image → Gemini → speak
