@@ -7,10 +7,9 @@ from gtts import gTTS
 import google.generativeai as genai
 import streamlit.components.v1 as components
 
-# ===== Config =====
 FIXED_PROMPT = "Describe what is in front of me in few words."
 
-# ----- Page -----
+# --- Page ---
 st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
 st.markdown("""
 <style>
@@ -20,7 +19,7 @@ div[data-testid="stToolbar"]{display:none!important;}
 """, unsafe_allow_html=True)
 st.title("🕶️ Smart Glasses Assistant (Camera/Upload + Voice → Auto-Speak)")
 
-# ----- Helpers -----
+# --- Helpers ---
 def guess_mime(name: str, default="application/octet-stream") -> str:
     m, _ = mimetypes.guess_type(name); return m or default
 
@@ -44,7 +43,7 @@ def gen_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
     r = m.generate_content(parts, request_options={"timeout": timeout})
     return (getattr(r, "text", "") or "").strip()
 
-# ----- State -----
+# --- State ---
 st.session_state.setdefault("last_mp3", b"")
 st.session_state.setdefault("auto_speak", True)
 
@@ -108,18 +107,27 @@ if enable_hotword:
     live_div = "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""
     live_update = "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);" if show_live else ""
 
-    # HTML/JS with placeholders (avoid f-string brace issues)
+    # Component HTML (stable key so setComponentValue works reliably)
     html_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
+      <button id="snapBtn"  style="padding:6px 12px;border-radius:8px;">Snap</button>
       <button id="stopBtn"  style="padding:6px 12px;border-radius:8px;">Stop</button>
       <span id="status" style="margin-left:8px;color:#aaa;">idle</span>
+      <span id="sent" style="margin-left:10px;color:#7bd389;"></span>
     </div>
     <video id="v" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
     %%LIVE_DIV%%
     <script>
-      const HOT = ['capture'];  // <-- single keyword
-      function sendValue(val){window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',value:JSON.stringify(val)}, '*');}
+      const HOT = ['capture'];
+      const sent = document.getElementById('sent');
+
+      function sendValue(val){
+        window.parent.postMessage(
+          {isStreamlitMessage:true, type:'streamlit:setComponentValue', value: JSON.stringify(val)},
+          '*'
+        );
+      }
       function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').trim();}
 
       // Camera
@@ -155,14 +163,14 @@ if enable_hotword:
           }
           %%LIVE_UPDATE%%
           const test = norm((lastFinal + ' ' + interim));
-          // exact keyword or word-boundary match
-          const hit = HOT.some(hw => test.includes(hw)) || /\bcapture\b/.test(test);
+          const hit = HOT.some(hw => test.includes(hw)) || /\\bcapture\\b/.test(test);
           if(hit) takeAndSend();
         };
         try{recog.start();}catch(_){}
       }
       function stopSR(){
         if(recog) try{recog.stop();}catch(_){}
+        if(stream) stream.getTracks().forEach(t=>t.stop());
       }
 
       function takeAndSend(){
@@ -170,20 +178,25 @@ if enable_hotword:
         const c=document.createElement('canvas');
         c.width=video.videoWidth; c.height=video.videoHeight;
         const ctx=c.getContext('2d'); ctx.drawImage(video,0,0,c.width,c.height);
-        const dataURL=c.toDataURL('image/jpeg',0.92);
-        sendValue({event:'capture', image:dataURL});
+        // lower quality to keep message small
+        const dataURL=c.toDataURL('image/jpeg',0.7);
+        sendValue({event:'capture', image:dataURL, ts: Date.now()});
+        sent.textContent = 'sent!';
+        setTimeout(()=>sent.textContent='', 800);
         lastFinal='';
       }
 
       document.getElementById('startBtn').onclick=()=>{ startCam(); startSR(); };
-      document.getElementById('stopBtn').onclick =()=>{ stopSR(); if(stream) stream.getTracks().forEach(t=>t.stop()); };
-      // auto start
+      document.getElementById('snapBtn').onclick =()=>{ takeAndSend(); };
+      document.getElementById('stopBtn').onclick =()=>{ stopSR(); };
+
+      // auto start on load
       startCam(); startSR();
     </script>
     """
 
     html = html_tpl.replace("%%LIVE_DIV%%", live_div).replace("%%LIVE_UPDATE%%", live_update)
-    result = components.html(html, height=520 if show_live else 420, scrolling=False)
+    result = components.html(html, height=520 if show_live else 440, scrolling=False, key="hotword_component")
 
     if result:
         try:
@@ -198,7 +211,7 @@ if enable_hotword:
             img_bytes = base64.b64decode(b64)
             st.image(img_bytes, caption="Snapshot", use_container_width=True)
 
-            # always auto-speak for hotword captures
+            # auto-speak for hotword captures
             st.session_state["auto_speak"] = True
 
             # Gemini with fixed prompt
