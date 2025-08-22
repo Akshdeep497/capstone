@@ -154,7 +154,7 @@ if enable_hotword:
     html_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
-      <button id="stopBtn"  style="padding:6px 12px;border-radius:8-px;">Stop</button>
+      <button id="stopBtn"  style="padding:6px 12px;border-radius:8px;">Stop</button>
       <span id="status" style="margin-left:8px;color:#aaa;">idle</span>
     </div>
     <video id="v" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
@@ -238,19 +238,18 @@ if enable_hotword:
 
 # ================= Keyboard Capture Mode (press 'c') =================
 st.header("Keyboard Capture Mode")
-st.caption("Enable, then press **C** to capture (or click the in-frame button).")
+st.caption("Enable, then press **C** to capture, or use the button.")
 
 enable_kbd = st.toggle("Enable keyboard capture", value=False)
 
 if enable_kbd:
-    # ADDED THE AUTOREFRESH HERE
     st_autorefresh(interval=500, key="keyboard_poll")
 
     key_tpl = """
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
       <button id="startBtn2" style="padding:6px 12px;border-radius:8px;">Start Camera</button>
       <button id="stopBtn2"  style="padding:6px 12px;border-radius:8px;">Stop Camera</button>
-      <button id="capBtn2"   style="padding:6px 12px;border-radius:8px;">Capture (C)</button>
+      <button id="capBtn2"   style="padding:6px 12px;border-radius:8px;">Capture Now</button>
       <span id="status2" style="margin-left:8px;color:#aaa;">idle</span>
     </div>
     <video id="v2" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
@@ -264,7 +263,7 @@ if enable_kbd:
         try{
           stream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
           video.srcObject = stream;
-          document.getElementById('status2').textContent='ready — press C to capture';
+          document.getElementById('status2').textContent='ready — press C or Capture Now';
         }catch(e){
           sendValue({event:'error', message:'camera error: '+e});
         }
