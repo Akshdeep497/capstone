@@ -1,60 +1,75 @@
 # app.py
-import base64, json, mimetypes
+import time, wave, threading, re, base64, mimetypes
+from collections import deque
 from io import BytesIO
 
+import numpy as np
+from PIL import Image
 import streamlit as st
-import streamlit.components.v1 as components
 from gtts import gTTS
 import google.generativeai as genai
-from streamlit_autorefresh import st_autorefresh
 
+# --- WebRTC ---
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
+
+# ===== Config =====
 FIXED_PROMPT = "Describe what is in front of me in few words."
+STYLE_NOTE = ("Keep answers crisp: ≤2 sentences (≤40 words). "
+              "No filler. Up to 3 bullets if listing.")
 
-# --- Page ---
+# ===== Page =====
 st.set_page_config(page_title="Smart Glasses Assistant", page_icon="🕶️", layout="centered")
 st.markdown("""
 <style>
 section[data-testid="stSidebar"]{display:none!important;}
 div[data-testid="stToolbar"]{display:none!important;}
-</style>
-""", unsafe_allow_html=True)
-st.title("🕶️ Smart Glasses Assistant (Camera/Upload + Voice → Auto-Speak)")
+</style>""", unsafe_allow_html=True)
+st.title("🕶️ Smart Glasses Assistant (Upload/Camera + Voice Capture)")
 
-# --- Helpers ---
+# ===== Helpers =====
 def guess_mime(name: str, default="application/octet-stream") -> str:
     m, _ = mimetypes.guess_type(name); return m or default
 
 def tts_bytes(text: str) -> bytes:
     buf = BytesIO(); gTTS(text).write_to_fp(buf); buf.seek(0); return buf.read()
 
-def speak_autoplay(mp3_bytes: bytes):
-    if not mp3_bytes: return
-    b64 = base64.b64encode(mp3_bytes).decode()
+def speak_autoplay(mp3: bytes):
+    if not mp3: return
+    b64 = base64.b64encode(mp3).decode()
     st.session_state["audio_counter"] = st.session_state.get("audio_counter", 0) + 1
     aid = f"tts_{st.session_state['audio_counter']}"
     st.markdown(f"""
-    <audio id="{aid}" autoplay>
-      <source src="data:audio/mp3;base64,{b64}" type="audio/mpeg">
-    </audio>
-    <script>document.getElementById("{aid}")?.play?.().catch(()=>{{}})</script>
-    """, unsafe_allow_html=True)
+    <audio id="{aid}" autoplay><source src="data:audio/mp3;base64,{b64}" type="audio/mpeg"></audio>
+    <script>document.getElementById("{aid}")?.play?.().catch(()=>{{}})</script>""", unsafe_allow_html=True)
 
 def gen_gemini(parts, model="gemini-2.5-flash", timeout=90) -> str:
     m = genai.GenerativeModel(model)
     r = m.generate_content(parts, request_options={"timeout": timeout})
     return (getattr(r, "text", "") or "").strip()
 
-# --- State ---
-st.session_state.setdefault("last_mp3", b"")
-st.session_state.setdefault("auto_speak", True)
-st.session_state.setdefault("last_capture_ts", 0)
+def wav_from_int16(samples: np.ndarray, sr: int) -> bytes:
+    bio = BytesIO()
+    with wave.open(bio, "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+        wf.writeframes(samples.tobytes())
+    return bio.getvalue()
 
-# ============= Manual Mode (unchanged) =============
+def norm_text(s: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).strip()
+
+# ===== State =====
+st.session_state.setdefault("auto_speak", True)
+st.session_state.setdefault("last_mp3", b"")
+st.session_state.setdefault("last_rgb", None)
+st.session_state.setdefault("last_trigger_ts", 0.0)
+
+# ================= Manual Mode =================
 st.header("Manual Mode")
 img_file = st.file_uploader("📁 Upload image", type=["jpg","jpeg","png","webp"])
 cam = st.camera_input("Or take a photo")
 if cam is not None: img_file = cam
 text_prompt = st.text_input("🔤 Optional text prompt (short)", "")
+
 c1, c2, c3 = st.columns(3)
 with c1: go = st.button("🧠 Analyze & Speak")
 with c2: stop = st.button("🛑 Stop")
@@ -64,158 +79,161 @@ if go:
     api_key = st.secrets.get("GOOGLE_API_KEY")
     if not api_key: st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
     genai.configure(api_key=api_key)
+
     if not img_file: st.error("Provide an image (upload or camera)."); st.stop()
 
-    parts = ["You are an AI smart glasses assistant. Keep answers ≤2 sentences (≤40 words)."]
+    parts = [f"You are an AI smart glasses assistant. {STYLE_NOTE}"]
     if cam is not None:
         img_bytes, img_mime = cam.getvalue(), "image/jpeg"
     else:
         img_bytes, img_mime = img_file.read(), guess_mime(getattr(img_file, "name", "image.jpg"), "image/jpeg")
     parts.append({"mime_type": img_mime, "data": img_bytes})
-    if text_prompt.strip(): parts.append(f"Additional user text: {text_prompt.strip()}")
+    if text_prompt.strip(): parts.append(f"User note: {text_prompt.strip()}")
+
     with st.spinner("Thinking..."): reply = gen_gemini(parts) or "I couldn't generate a response."
     st.subheader("🧾 Response"); st.write(reply)
     st.session_state["last_mp3"] = tts_bytes(reply)
 
 if stop: st.session_state["auto_speak"] = False
-if replay and st.session_state.get("last_mp3"): st.session_state["auto_speak"] = True
-if st.session_state.get("auto_speak", True) and st.session_state.get("last_mp3"): speak_autoplay(st.session_state["last_mp3"])
+if replay and st.session_state["last_mp3"]: st.session_state["auto_speak"] = True
+if st.session_state["auto_speak"] and st.session_state["last_mp3"]: speak_autoplay(st.session_state["last_mp3"])
 
-# ============= Browser Hotword Mode (no WebRTC) =============
-st.header("Browser Hotword Mode (no WebRTC)")
-st.caption('Say **"capture"** to snap & describe. Chrome/Edge recommended.')
+# ================= Voice Capture Mode (no components.html) =================
+st.header("Voice Capture Mode")
+st.caption('Say **"capture"** to snap & describe. This runs fully via WebRTC.')
+enable_voice = st.toggle("Enable voice-triggered capture", value=False)
+show_debug = st.checkbox("Show heard words (debug)", value=True)
 
-enable_hotword = st.toggle("Enable browser wake-word", value=False)
-show_live = st.checkbox("Show live transcript", value=True)
+if enable_voice:
+    # --- Tune ASR chunking ---
+    RMS_SPEECH = 0.006
+    CHUNK_SEC = 3.5
+    PULL_MIN_GAP = 0.8
+    OVERLAP_FACTOR = 0.5
 
-if enable_hotword:
-    # Ensure Streamlit picks up posted values on older builds
-    st_autorefresh(interval=900, key="hotword_poll")
+    class AudioRing:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.sample_rate = 16000
+            self.buf = deque(maxlen=16000 * 8)  # 8s
+            self.frames = 0
+            self.last_rms = 0.0
+            self.last_chunk_len = 0
+            self.last_pull_ts = 0.0
+            self.last_phrase = ""
+        def on_frame(self, frame):
+            arr = frame.to_ndarray()
+            ch = arr[0] if arr.ndim == 2 else arr
+            if ch.dtype == np.int16: f = ch.astype(np.float32) / 32768.0
+            elif ch.dtype == np.int32: f = ch.astype(np.float32) / 2147483648.0
+            else: f = ch.astype(np.float32)
+            sr = getattr(frame, "sample_rate", None) or self.sample_rate
+            i16 = np.clip(f * 32767.0, -32768, 32767).astype(np.int16)
+            with self.lock:
+                self.sample_rate = sr
+                self.last_rms = float(np.sqrt(np.mean(f * f) + 1e-12))
+                self.frames += 1
+                self.buf.extend(i16.tolist())
+        def get_recent(self, seconds=CHUNK_SEC):
+            now = time.time()
+            with self.lock:
+                if now - self.last_pull_ts < max(PULL_MIN_GAP, seconds * (1 - OVERLAP_FACTOR)):
+                    return None, None
+                if len(self.buf) < int(0.4 * self.sample_rate):
+                    return None, None
+                n = int(seconds * self.sample_rate)
+                data = list(self.buf)[-n:]
+                self.last_pull_ts = now
+                self.last_chunk_len = len(data)
+            return np.array(data, dtype=np.int16), self.sample_rate
 
-    live_div = "<div id='live' style='margin-top:6px;color:#bbb;font-family:monospace;white-space:pre-wrap;'></div>" if show_live else ""
-    live_update = "const el=document.getElementById('live'); if(el) el.textContent = ('Final: '+lastFinal+'\\nInterim: '+interim);" if show_live else ""
+    if "audioring" not in st.session_state: st.session_state["audioring"] = AudioRing()
+    ring: AudioRing = st.session_state["audioring"]
 
-    html_tpl = """
-    <div style="display:flex;gap:10px;align-items:center;margin:8px 0;">
-      <button id="startBtn" style="padding:6px 12px;border-radius:8px;">Start</button>
-      <button id="snapBtn"  style="padding:6px 12px;border-radius:8px;">Snap</button>
-      <button id="stopBtn"  style="padding:6px 12px;border-radius:8px;">Stop</button>
-      <span id="status" style="margin-left:8px;color:#aaa;">idle</span>
-      <span id="sent" style="margin-left:10px;color:#7bd389;"></span>
-    </div>
-    <video id="v" autoplay playsinline muted style="width:100%;max-width:640px;border-radius:10px;background:#111"></video>
-    %%LIVE_DIV%%
-    <script>
-      // Streamlit bridge
-      function sendValue(val){
-        try { if (window.Streamlit && Streamlit.setComponentReady) Streamlit.setComponentReady(); } catch (e) {}
-        try { if (window.Streamlit && Streamlit.setFrameHeight) Streamlit.setFrameHeight(document.body.scrollHeight); } catch (e) {}
-        try { if (window.Streamlit && Streamlit.setComponentValue) { Streamlit.setComponentValue(JSON.stringify(val)); return; } } catch (e) {}
-        // fallback for very old builds
-        window.parent.postMessage({isStreamlitMessage:true, type:'streamlit:setComponentValue', value: JSON.stringify(val)}, '*');
-      }
+    def video_cb(frame):
+        # store last RGB frame for snapshot
+        bgr = frame.to_ndarray(format="bgr24")
+        st.session_state["last_rgb"] = bgr[:, :, ::-1]
+        return frame
 
-      const HOT = ['capture'];
-      const sent = document.getElementById('sent');
-      function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').trim();}
+    def audio_cb(frame):
+        ring.on_frame(frame)
+        return frame
 
-      // Camera
-      const video = document.getElementById('v');
-      let stream = null;
-      async function startCam(){
-        try{
-          stream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
-          video.srcObject = stream;
-        }catch(e){ sendValue({event:'error', message:'camera error: '+e}); }
-      }
+    # ICE servers (STUN works for most)
+    stun = ["stun:stun.l.google.com:19302","stun:stun1.l.google.com:19302","stun:stun2.l.google.com:19302"]
+    turn_urls = [u.strip() for u in st.secrets.get("TURN_URLS","").split(",") if u.strip()]
+    turn_user = st.secrets.get("TURN_USERNAME",""); turn_pass = st.secrets.get("TURN_PASSWORD","")
+    ice_servers = [{"urls": stun}]
+    if turn_urls and turn_user and turn_pass:
+        ice_servers.append({"urls": turn_urls, "username": turn_user, "credential": turn_pass})
+    rtc_config = {"iceServers": ice_servers}
 
-      // Speech
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      let recog = null; let lastFinal="";
-      function startSR(){
-        if(!SR){ sendValue({event:'error', message:'Web Speech API not supported'}); return; }
-        recog = new SR();
-        recog.continuous = true; recog.interimResults = true; recog.lang = 'en-US';
-        recog.onstart = ()=>{ document.getElementById('status').textContent='listening…'; };
-        recog.onerror = e=>{ sendValue({event:'error', message:'speech error: '+(e && e.error ? e.error : 'unknown')}); };
-        recog.onend = ()=>{ document.getElementById('status').textContent='stopped'; };
-        recog.onresult = (ev)=>{
-          let interim = '';
-          for(let i=ev.resultIndex;i<ev.results.length;i++){
-            const t = ev.results[i][0].transcript;
-            if(ev.results[i].isFinal) lastFinal += ' ' + t; else interim += t;
-          }
-          %%LIVE_UPDATE%%
-          const test = norm(lastFinal + ' ' + interim);
-          if (HOT.some(hw => test.includes(hw)) || /\\bcapture\\b/.test(test)) takeAndSend();
-        };
-        try { recog.start(); } catch (e) {}
-      }
-      function stopSR(){
-        try { if(recog) recog.stop(); } catch (e) {}
-        try { if(stream) stream.getTracks().forEach(t=>t.stop()); } catch (e) {}
-      }
+    ctx = webrtc_streamer(
+        key="vcam",
+        mode=WebRtcMode.SENDONLY,
+        video_frame_callback=video_cb,
+        audio_frame_callback=audio_cb,
+        media_stream_constraints={"video": True, "audio": True},
+        rtc_configuration=rtc_config,
+        async_processing=True,
+        sendback_audio=False,
+    )
 
-      function takeAndSend(){
-        if(!video.videoWidth) return;
-        const maxW = 640, scale = Math.min(1, maxW / video.videoWidth);
-        const w = Math.round(video.videoWidth * scale), h = Math.round(video.videoHeight * scale);
-        const c=document.createElement('canvas'); c.width=w; c.height=h;
-        c.getContext('2d').drawImage(video,0,0,w,h);
-        const dataURL=c.toDataURL('image/jpeg',0.6);
-        const ts = Date.now();
-        sendValue({event:'capture', image:dataURL, ts});
-        sent.textContent = 'sent!'; setTimeout(()=>sent.textContent='', 800);
-        lastFinal='';
-      }
+    # Poll + transcribe with Gemini
+    if ctx.state.playing:
+        st.info("Say “capture” clearly. A photo will be snapped and described automatically.")
 
-      document.getElementById('startBtn').onclick=()=>{ startCam(); startSR(); };
-      document.getElementById('snapBtn').onclick =()=>{ takeAndSend(); };
-      document.getElementById('stopBtn').onclick =()=>{ stopSR(); };
-      startCam(); startSR(); // auto start
-    </script>
-    """
-    html = html_tpl.replace("%%LIVE_DIV%%", live_div).replace("%%LIVE_UPDATE%%", live_update)
-    result = components.html(html, height=520 if show_live else 440, scrolling=False)
+        # quick poll to keep UI live
+        st.experimental_rerun  # (noop hint to Streamlit not needed but keeps IDE happy)
 
-    # Consume the posted value
-    if result:
-      # result may be a JSON string or already a dict on some builds
-      data = None
-      if isinstance(result, str):
-          try: data = json.loads(result)
-          except Exception: data = {}
-      elif isinstance(result, dict):
-          data = result
-      else:
-          data = {}
+        if show_debug:
+            st.caption(f"Frames: {ring.frames} | RMS: {ring.last_rms:.4f} | chunk: {ring.last_chunk_len}")
 
-      if data.get("event") == "error":
-          st.warning(data.get("message", "(unknown error)"))
-      elif data.get("event") == "capture" and data.get("image"):
-          ts = int(data.get("ts", 0))
-          if ts > st.session_state["last_capture_ts"]:
-              st.session_state["last_capture_ts"] = ts
+        should_pull = ring.last_rms >= RMS_SPEECH or show_debug
+        if should_pull:
+            samples, sr = ring.get_recent(CHUNK_SEC)
+            if samples is not None:
+                api_key = st.secrets.get("GOOGLE_API_KEY")
+                if not api_key: st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
+                genai.configure(api_key=api_key)
 
-              # decode and show snapshot
-              b64 = data["image"].split(",", 1)[1]
-              img_bytes = base64.b64decode(b64)
-              st.image(img_bytes, caption="Snapshot", use_container_width=True)
+                wav_bytes = wav_from_int16(samples, sr)
+                parts_t = [
+                    ("transcribe this audio in plain lowercase. "
+                     "return just the words. if you hear the word 'capture', include it."),
+                    {"mime_type": "audio/wav", "data": wav_bytes},
+                ]
+                try:
+                    transcript = gen_gemini(parts_t, model="gemini-1.5-flash")
+                except Exception:
+                    transcript = ""
+                phrase = norm_text(transcript).strip()
+                ring.last_phrase = phrase
 
-              # Gemini with fixed prompt
-              api_key = st.secrets.get("GOOGLE_API_KEY")
-              if not api_key: st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
-              genai.configure(api_key=api_key)
+                if show_debug:
+                    st.caption(f"Heard: {phrase or '—'}")
 
-              parts = [FIXED_PROMPT, {"mime_type": "image/jpeg", "data": img_bytes}]
-              with st.spinner("Analyzing snapshot..."):
-                  reply = gen_gemini(parts) or "I couldn't see enough to describe it."
-              st.subheader("🧾 Response"); st.write(reply)
+                is_trigger = (("capture" in phrase.split()) or re.search(r"\bcapture\b", phrase))
+                if is_trigger and (time.time() - st.session_state["last_trigger_ts"] > 2.5):
+                    st.session_state["last_trigger_ts"] = time.time()
+                    if st.session_state["last_rgb"] is not None:
+                        # encode current frame
+                        buf = BytesIO()
+                        Image.fromarray(st.session_state["last_rgb"]).save(buf, format="JPEG", quality=90)
+                        shot = buf.getvalue()
 
-              # auto-speak
-              try:
-                  mp3 = tts_bytes(reply)
-                  st.session_state["last_mp3"] = mp3
-                  speak_autoplay(mp3)
-              except Exception as e:
-                  st.warning(f"TTS failed: {e}")
+                        # call Gemini with fixed prompt
+                        parts2 = [FIXED_PROMPT, {"mime_type":"image/jpeg","data":shot}]
+                        with st.spinner("Capturing & describing..."):
+                            try: reply = gen_gemini(parts2)
+                            except Exception as e: st.exception(e); reply = ""
+                        st.subheader("🧾 Voice Capture Response"); st.write(reply or "(No text)")
+
+                        # speak
+                        try:
+                            mp3 = tts_bytes(reply or "I could not generate a response.")
+                            st.session_state["last_mp3"] = mp3
+                            if st.session_state.get("auto_speak", True): speak_autoplay(mp3)
+                        except Exception as e:
+                            st.warning(f"TTS failed: {e}")
