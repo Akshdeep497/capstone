@@ -1,5 +1,5 @@
 # app.py
-import base64, mimetypes, time, wave, re, threading
+import base64, mimetypes, time, wave, re, threading, difflib
 from collections import deque
 from io import BytesIO
 
@@ -9,6 +9,7 @@ import streamlit as st
 from gtts import gTTS
 import google.generativeai as genai
 
+# WebRTC (voice-triggered capture)
 try:
     from streamlit_webrtc import webrtc_streamer, WebRtcMode
     _VOICE_OK = True
@@ -156,12 +157,19 @@ if not _VOICE_OK and st.session_state["voice_mode"]:
     st.info("Voice capture needs streamlit-webrtc + aiortc installed.")
 elif _VOICE_OK and st.session_state["voice_mode"]:
 
-    # ---- Thread-safe audio ring (new callback API) ----
+    # --- Hotword + ASR tuning ---
+    HOTWORDS = ["hey capture", "capture", "take picture", "hey picture", "hey capture now"]
+    RMS_SPEECH = 0.01          # gate low-noise pulls
+    CHUNK_SEC = 3.0            # longer chunk => fewer blanks
+    PULL_MIN_GAP = 0.8         # seconds between pulls
+    OVERLAP_FACTOR = 0.5       # encourage overlap
+
+    # ---- Thread-safe audio ring (callback API) ----
     class AudioRing:
         def __init__(self):
             self.lock = threading.Lock()
             self.sample_rate = 16000
-            self.buf = deque(maxlen=16000 * 6)   # ~6s
+            self.buf = deque(maxlen=16000 * 8)   # ~8s
             self.frames = 0
             self.last_rms = 0.0
             self.last_chunk_len = 0
@@ -179,11 +187,13 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
                 self.last_rms = float(np.sqrt(np.mean(f * f) + 1e-12))
                 self.frames += 1
                 self.buf.extend(i16.tolist())
-        def get_recent(self, seconds=2.0):
+        def get_recent(self, seconds=CHUNK_SEC):
             now = time.time()
             with self.lock:
-                if now - self.last_pull_ts < 1.2: return None, None
-                if len(self.buf) < int(0.4 * self.sample_rate): return None, None
+                if now - self.last_pull_ts < max(PULL_MIN_GAP, seconds * (1 - OVERLAP_FACTOR)):
+                    return None, None
+                if len(self.buf) < int(0.4 * self.sample_rate):
+                    return None, None
                 n = int(seconds * self.sample_rate)
                 data = list(self.buf)[-n:]
                 self.last_pull_ts = now
@@ -215,10 +225,9 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
     rtc_config = {"iceServers": ice_servers}
     if HAS_TURN and force_turn: rtc_config["iceTransportPolicy"] = "relay"
 
-    # IMPORTANT: SENDONLY ensures the client actually *sends* mic/audio consistently
     ctx = webrtc_streamer(
         key="voice-cam",
-        mode=WebRtcMode.SENDONLY,
+        mode=WebRtcMode.SENDONLY,             # ensure the browser sends mic frames
         video_frame_callback=video_cb,
         audio_frame_callback=audio_cb,
         media_stream_constraints={"video": True, "audio": True},
@@ -228,7 +237,7 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
     )
 
     if ctx.state.playing:
-        st_autorefresh(interval=1200, key="vc_poll2")
+        st_autorefresh(interval=900, key="vc_poll2")  # poll a bit faster
 
         if show_heard:
             st.caption(f"Frames: {ring.frames} | RMS: {ring.last_rms:.4f} | chunk: {ring.last_chunk_len}")
@@ -236,37 +245,56 @@ elif _VOICE_OK and st.session_state["voice_mode"]:
         if ring.frames == 0:
             st.error("No microphone frames received. Click the lock icon → Microphone: Allow, then reload.")
         else:
-            samples, sr = ring.get_recent(2.0)
-            if samples is not None and (ring.last_rms > 0.001 or show_heard):
-                api_key = st.secrets.get("GOOGLE_API_KEY")
-                if not api_key: st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
-                genai.configure(api_key=api_key)
+            should_pull = ring.last_rms >= RMS_SPEECH or show_heard
+            if should_pull:
+                samples, sr = ring.get_recent(CHUNK_SEC)
+                if samples is not None:
+                    api_key = st.secrets.get("GOOGLE_API_KEY")
+                    if not api_key: st.error("Add GOOGLE_API_KEY to .streamlit/secrets.toml"); st.stop()
+                    genai.configure(api_key=api_key)
 
-                wav_bytes = wav_from_int16(samples, sr)
-                parts_t = [
-                    "transcribe this audio; return the exact words in lowercase.",
-                    {"mime_type": "audio/wav", "data": wav_bytes},
-                ]
-                try: transcript = generate_with_gemini(parts_t, model="gemini-1.5-flash")
-                except Exception: transcript = ""
-                phrase = norm_text(transcript)
-                st.session_state["last_heard"] = phrase
-                if show_heard: st.caption("Heard: " + phrase)
+                    wav_bytes = wav_from_int16(samples, sr)
+                    parts_t = [
+                        ("transcribe this audio in lowercase only. "
+                         "if you clearly hear the phrase 'hey capture', output exactly 'hey capture'."),
+                        {"mime_type": "audio/wav", "data": wav_bytes},
+                    ]
+                    try:
+                        transcript = generate_with_gemini(parts_t, model="gemini-1.5-flash")
+                    except Exception:
+                        transcript = ""
+                    raw = (transcript or "").strip()
+                    phrase = norm_text(raw)
 
-                HOT = ["hey capture","capture","take picture","hey picture","hey capture now"]
-                if any(h in phrase for h in HOT) and (time.time() - st.session_state["last_trigger_ts"] > 2.5):
-                    st.session_state["last_trigger_ts"] = time.time()
-                    if st.session_state["last_rgb"] is not None:
-                        buf = BytesIO(); Image.fromarray(st.session_state["last_rgb"]).save(buf, format="JPEG", quality=90)
-                        shot = buf.getvalue()
-                        parts2 = ["Describe what is in front of me in few words.", {"mime_type": "image/jpeg", "data": shot}]
-                        with st.spinner("Capturing & describing..."):
-                            try: reply = generate_with_gemini(parts2)
-                            except Exception as e: st.exception(e); reply = ""
-                        st.subheader("🧾 Voice Capture Response"); st.write(reply or "(No text)")
-                        try:
-                            mp3 = tts_bytes(reply or "I could not generate a response.")
-                            st.session_state["last_mp3"] = mp3
-                            if st.session_state.get("auto_speak", True): speak_autoplay(mp3)
-                        except Exception as e:
-                            st.warning(f"TTS failed: {e}")
+                    # fuzzy hotword match
+                    best_ratio, best_hw = max(
+                        (difflib.SequenceMatcher(None, phrase, hw).ratio(), hw) for hw in HOTWORDS
+                    )
+                    hotword = best_hw if (best_ratio >= 0.74 or any(hw in phrase for hw in HOTWORDS)) else None
+
+                    st.session_state["last_heard"] = phrase
+                    if show_heard:
+                        st.caption(f"Heard (raw): {raw or '—'}")
+                        st.caption(f"Heard (norm): {phrase or '—'} | hotword: {hotword or '—'}")
+
+                    # trigger photo + describe
+                    if hotword and (time.time() - st.session_state["last_trigger_ts"] > 2.5):
+                        st.session_state["last_trigger_ts"] = time.time()
+                        if st.session_state["last_rgb"] is not None:
+                            buf = BytesIO()
+                            Image.fromarray(st.session_state["last_rgb"]).save(buf, format="JPEG", quality=90)
+                            shot = buf.getvalue()
+                            parts2 = [
+                                "Describe what is in front of me in few words.",
+                                {"mime_type": "image/jpeg", "data": shot},
+                            ]
+                            with st.spinner("Capturing & describing..."):
+                                try: reply = generate_with_gemini(parts2)
+                                except Exception as e: st.exception(e); reply = ""
+                            st.subheader("🧾 Voice Capture Response"); st.write(reply or "(No text)")
+                            try:
+                                mp3 = tts_bytes(reply or "I could not generate a response.")
+                                st.session_state["last_mp3"] = mp3
+                                if st.session_state.get("auto_speak", True): speak_autoplay(mp3)
+                            except Exception as e:
+                                st.warning(f"TTS failed: {e}")
