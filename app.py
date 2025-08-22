@@ -236,9 +236,9 @@ if enable_hotword:
                 st.session_state["last_event_id"] = event_id
                 handle_snapshot(data["image"])
 
-# ================= Keyboard Capture Mode (press 'c') =================
+# ================= Keyboard Capture Mode (press 'g') =================
 st.header("Keyboard Capture Mode")
-st.caption("Enable, then press **C** to capture, or use the button.")
+st.caption("Enable, then press **G** to capture, or use the button.")
 
 enable_kbd = st.toggle("Enable keyboard capture", value=False)
 
@@ -263,7 +263,7 @@ if enable_kbd:
         try{
           stream = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
           video.srcObject = stream;
-          document.getElementById('status2').textContent='ready — press C or Capture Now';
+          document.getElementById('status2').textContent='ready — press G or Capture Now';
         }catch(e){
           sendValue({event:'error', message:'camera error: '+e});
         }
@@ -288,7 +288,7 @@ if enable_kbd:
       document.getElementById('capBtn2').onclick   = capture;
 
       window.addEventListener('keydown', (e)=>{
-        if((e.key||'').toLowerCase() === 'c'){
+        if((e.key||'').toLowerCase() === 'g'){
           e.preventDefault();
           capture();
         }
